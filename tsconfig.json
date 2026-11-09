@@ -1,0 +1,34 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": [
+      "ES2024"
+    ],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "types": [
+      "node",
+      "react"
+    ],
+    "noEmit": true
+  },
+  "include": [
+    "index.*",
+    "server",
+    "client",
+    "shared",
+    "tests"
+  ],
+  "exclude": [
+    "node_modules",
+    "client/workspace/**/*.test.ts",
+    "client/workspace/**/*.test.tsx",
+    "server/workspace/**/*.test.ts",
+    "shared/workspace/**/*.test.ts"
+  ]
+}

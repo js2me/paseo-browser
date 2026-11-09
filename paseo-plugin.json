@@ -1,0 +1,28 @@
+{
+  "id": "paseo-browser",
+  "name": "Chrome browser",
+  "requirements": {
+    "paseo": ">=0.15.0"
+  },
+  "build": [
+    [
+      "npm",
+      "ci",
+      "--omit=dev",
+      "--ignore-scripts"
+    ],
+    [
+      "node",
+      "server/prepare.mjs"
+    ],
+    [
+      "node",
+      "server/workspace/prepare-runtime.mjs"
+    ],
+    [
+      "node",
+      "server/install-agent-skill.mjs"
+    ]
+  ],
+  "description": "Shared Chrome workspace panel, human/agent control and Chrome DevTools tools"
+}

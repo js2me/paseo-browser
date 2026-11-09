@@ -1,0 +1,61 @@
+{
+  "name": "paseo-browser",
+  "version": "0.3.0",
+  "description": "Chrome browser tools for Paseo agents",
+  "type": "module",
+  "license": "MIT",
+  "files": [
+    "index.server.ts",
+    "index.client.tsx",
+    "server",
+    "client",
+    "shared",
+    "paseo-plugin.json",
+    "OVERVIEW.md",
+    "README.md",
+    "tsconfig.json",
+    "!server/runtime.json",
+    "npm-shrinkwrap.json",
+    "THIRD_PARTY_LICENSES.md",
+    "!**/*.test.ts",
+    "!**/*.test.tsx",
+    "agent-skills"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts && vitest run client/workspace server/workspace shared/workspace",
+    "test:chrome": "tsx tests/chrome-smoke.ts",
+    "postinstall": "node server/prepare.mjs && node server/workspace/prepare-runtime.mjs",
+    "test:workspace": "vitest run client/workspace server/workspace shared/workspace",
+    "prepare:workspace": "node server/workspace/prepare-runtime.mjs",
+    "test:shared": "tsx tests/workspace-smoke.ts",
+    "test:ui": "tsx tests/ui-smoke.ts",
+    "install:agent-skill": "node server/install-agent-skill.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "agent-browser": "0.39.2",
+    "chrome-devtools-mcp": "1.12.0",
+    "esbuild": "0.28.2",
+    "zod": "^4.4.3",
+    "@getpaseo/plugin": "0.15.0"
+  },
+  "devDependencies": {
+    "@getpaseo/client": "0.15.0",
+    "@getpaseo/protocol": "0.15.0",
+    "@tanstack/react-query": "^5.102.3",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.1.0",
+    "puppeteer-core": "^24.34.0",
+    "react": "19.1.0",
+    "react-dom": "^19.1.0",
+    "react-native": "0.81.5",
+    "react-native-web": "^0.21.2",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.4"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}
