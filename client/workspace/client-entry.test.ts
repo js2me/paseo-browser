@@ -2,7 +2,8 @@ import { expect, it, vi } from 'vitest';
 import type { PluginClientContext } from '@getpaseo/plugin/client';
 import contribute from '../../index.client';
 
-vi.mock('../native/desktop-service', () => ({ NativeDesktopService: class { dispose() {} } }));
+const { startNative, disposeNative } = vi.hoisted(() => ({ startNative: vi.fn(), disposeNative: vi.fn() }));
+vi.mock('../native/desktop-service', () => ({ NativeDesktopService: class { start = startNative; dispose = disposeNative; } }));
 vi.mock('../native/panel', () => ({ NativeBrowserPanel: () => null }));
 vi.mock('./browser', () => ({ contributeSharedBrowserClient: vi.fn(() => vi.fn()), SharedBrowserPanel: () => null }));
 vi.mock('./sidebar', () => ({ contributeSharedBrowserSidebar: vi.fn(() => vi.fn()) }));
@@ -23,5 +24,7 @@ it('boots every client contribution with icons available in Paseo 0.15', async (
   } as unknown as PluginClientContext;
   const cleanup = contribute(client);
   expect(register).toHaveBeenCalledTimes(4);
+  expect(startNative).toHaveBeenCalledTimes(1);
   await cleanup();
+  expect(disposeNative).toHaveBeenCalledTimes(1);
 });
