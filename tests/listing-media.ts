@@ -23,6 +23,7 @@ const bundle = await build({
   alias: { 'react-native': 'react-native-web', '@getpaseo/plugin/client': resolve('tests/ui/host-hooks.jsx') },
 });
 const rpc: Record<string, (input: any) => unknown> = {
+  'native.presence': () => relay.presence(),
   'native.exchange': input => relay.exchange(input),
   'native.watch': input => relay.watch(input.workspaceId, input.viewerId, input.afterSequence),
   'native.control': input => relay.control(input.workspaceId, input.viewerId, true, input.action),
@@ -54,7 +55,7 @@ const url = `http://127.0.0.1:${address.port}`;
 await writeFile(join(directory, 'registry.cjs'), `exports.getPaseoBrowserWebContentsForHostWindow=(id,host)=>{const record=globalThis.nativeGuests.get(id);return record?.host===host?record.contents:null};exports.getPaseoBrowserWorkspaceId=id=>globalThis.nativeGuests.get(id)?.workspaceId;`);
 await writeFile(join(directory, 'preload.cjs'), `const {contextBridge,ipcRenderer}=require('electron');contextBridge.exposeInMainWorld('paseoDesktop',{browser:{profilePartition:'persist:listing-demo',registerAttachedBrowser:input=>ipcRenderer.invoke('register',input),unregisterWorkspaceBrowser:id=>ipcRenderer.invoke('unregister',id),captureNativeFrame:input=>ipcRenderer.invoke('paseo:browser:native-frame',input),sendNativeCommand:input=>ipcRenderer.invoke('paseo:browser:native-command',input),readNativeEvents:input=>ipcRenderer.invoke('paseo:browser:native-events',input)}});`);
 await build({
-  stdin: { contents: `const {app,BrowserWindow,ipcMain,webContents}=require('electron');const {registerNativeBrowserBridgeIpc}=require(${JSON.stringify(resolve('integrations/paseo/native-bridge.cjs'))});globalThis.nativeGuests=new Map();app.setPath('userData',${JSON.stringify(join(directory,'profile'))});ipcMain.handle('register',(event,input)=>{globalThis.nativeGuests.set(input.browserId,{host:event.sender.id,contents:webContents.fromId(input.webContentsId),workspaceId:input.workspaceId});});ipcMain.handle('unregister',(_event,id)=>globalThis.nativeGuests.delete(id));app.whenReady().then(async()=>{registerNativeBrowserBridgeIpc();const window=new BrowserWindow({width:1280,height:900,show:true,webPreferences:{webviewTag:true,preload:${JSON.stringify(join(directory,'preload.cjs'))},contextIsolation:true,nodeIntegration:false}});await window.loadURL(${JSON.stringify(url)});});app.on('window-all-closed',()=>app.quit());`, resolveDir: process.cwd(), sourcefile: 'listing-main.cjs' },
+  stdin: { contents: `const {app,BrowserWindow,ipcMain,webContents}=require('electron');const {registerNativeBrowserBridgeIpc}=require(${JSON.stringify(resolve('integrations/paseo/native-bridge.cjs'))});globalThis.nativeGuests=new Map();app.setPath('userData',${JSON.stringify(join(directory,'profile'))});ipcMain.handle('register',(event,input)=>{globalThis.nativeGuests.set(input.browserId,{host:event.sender.id,contents:webContents.fromId(input.webContentsId),workspaceId:input.workspaceId});});ipcMain.handle('unregister',(_event,id)=>globalThis.nativeGuests.delete(id));app.whenReady().then(async()=>{registerNativeBrowserBridgeIpc();const window=new BrowserWindow({width:1280,height:900,show:true,webPreferences:{webviewTag:true,preload:${JSON.stringify(join(directory,'preload.cjs'))},contextIsolation:true,nodeIntegration:false}});await window.loadURL(${JSON.stringify(url + (process.env.PASEO_LISTING_COLD_START === '1' ? '/?cold=1' : ''))});});app.on('window-all-closed',()=>app.quit());`, resolveDir: process.cwd(), sourcefile: 'listing-main.cjs' },
   bundle: true, platform: 'node', format: 'cjs', external: ['electron'], outfile: join(directory, 'main.cjs'),
   plugins: [{ name: 'isolated-guest-registry', setup(builder) {
     builder.onResolve({ filter: /browser-webviews\/index\.js$/ }, () => ({ path: join(directory, 'registry.cjs') }));
@@ -73,18 +74,27 @@ try {
   for (let i=0; i<200 && !endpoint; i++) await pause(100);
   assert.ok(endpoint, log);
   desktop = await puppeteer.connect({ browserWSEndpoint: endpoint, defaultViewport: null });
-  const page = await desktop.waitForTarget(target => target.url() === url + '/').then(target => target.page()); assert.ok(page);
+  const page = await desktop.waitForTarget(target => target.url().startsWith(url + '/')).then(target => target.page()); assert.ok(page);
+  const cold = process.env.PASEO_LISTING_COLD_START === '1';
+  if (cold) {
+    relay.control('native-test','listing-agent',true,'acquire');
+    await relay.command('native-test','listing-agent','navigate',{url: url+'/demo'});
+    relay.control('native-test','listing-agent',true,'release');
+    assert.ok(String(await page.evaluate('document.body.innerText')).includes('Desktop pane parked'));
+  }
   for (let i=0; i<200 && !relay.watch('native-test','listing-monitor',0).state; i++) await pause(100);
   assert.ok(relay.watch('native-test','listing-monitor',0).state, log);
   relay.control('native-test','listing-agent',true,'acquire');
   await relay.command('native-test','listing-agent','navigate',{ url: url + '/demo' });
   relay.control('native-test','listing-agent',true,'release');
+  await mkdir(mediaDirectory, { recursive: true });
+  if (!cold) {
   await page.click('text/Take control');
   await page.waitForSelector('[aria-label="Open Chrome DevTools"]:not([aria-disabled="true"])');
   await pause(1000);
-  await mkdir(mediaDirectory, { recursive: true });
   await page.screenshot({ path: join(mediaDirectory, 'native-desktop.png') });
   await page.click('text/Release');
+  }
   mobile = await puppeteer.launch({ executablePath: process.env.PASEO_CHROME_BINARY ?? '/usr/bin/google-chrome', headless: true });
   const phone = await mobile.newPage(); await phone.setViewport({ width:390, height:844 });
   await phone.goto(url);

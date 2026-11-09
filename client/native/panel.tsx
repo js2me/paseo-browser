@@ -116,7 +116,7 @@ export function NativeBrowserPanel({
             ? reply.state && !reply.state.cdp
               ? "Update Paseo desktop to enable mobile sharing and DevTools."
               : reply.error
-            : "Open this workspace browser panel on the desktop host to start the broadcast.",
+            : "Waiting for a connected Paseo Desktop to start this workspace browser.",
         );
       } catch (error) {
         if (!stopped) setError(String(error));

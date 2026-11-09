@@ -2,6 +2,7 @@ import { afterEach, expect, it, vi } from "vitest";
 
 const { guests } = vi.hoisted(() => ({ guests: [] as any[] }));
 vi.mock("../workspace/web", () => ({
+  nativeDesktopBrowserApi: () => ({}),
   createNativeBrowserId: () => `guest-${guests.length}`,
   mountNativeGuest: () => {
     const guest = {
@@ -42,4 +43,23 @@ it("opens DevTools on the selected tab and requires human control", async () => 
   expect(() => service.openDevTools("workspace")).toThrow("Take control");
   service.dispose();
   expect(() => service.openDevTools("workspace")).toThrow("not ready");
+});
+
+
+it("starts and parks a remotely requested workspace without mounting a panel", async () => {
+  vi.useFakeTimers();
+  const rpc = vi.fn(async (contract: {name: string}) => contract.name === "native.presence"
+    ? { workspaceIds: [], requestedWorkspaceIds: ["remote-workspace"] }
+    : { accepted: true, controller: null, streaming: true, commands: [] });
+  const service = new NativeDesktopService({ rpc: rpc as any });
+  service.start(); service.start();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(guests).toHaveLength(1);
+  expect(guests[0].present).toHaveBeenCalledWith(null);
+  await vi.advanceTimersByTimeAsync(2100);
+  expect(guests).toHaveLength(1);
+  service.dispose();
+  const calls = rpc.mock.calls.length;
+  await vi.advanceTimersByTimeAsync(3000);
+  expect(rpc).toHaveBeenCalledTimes(calls);
 });

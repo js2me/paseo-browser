@@ -33,6 +33,7 @@ const output = await build({
 const errors: string[] = [];
 let hideRequested = false;
 const rpc: any = {
+  "native.presence": () => relay.presence(),
   "native.exchange": (input: any) => relay.exchange(input),
   "native.watch": (input: any) =>
     relay.watch(input.workspaceId, input.viewerId, input.afterSequence),

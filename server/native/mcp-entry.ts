@@ -47,7 +47,7 @@ const tools = [
     name,
     description:
       name === "native_browser_open"
-        ? "Open a site in the native desktop WebView shared with the mobile broadcast. Keep that workspace browser panel open on the desktop."
+        ? "Open a site in the native desktop WebView shared with the mobile broadcast. Keep Paseo Desktop connected to the host; the browser starts even when its panel is closed."
         : name === "native_browser_automation"
           ? "Execute a Paseo native browser command in the same desktop guest. Use snapshot for element refs; pass command arguments in args."
           : `Native shared browser: ${name}. Acquire control before actions and release after.`,

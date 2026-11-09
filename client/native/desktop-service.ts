@@ -2,12 +2,14 @@ import type { PluginClientContext } from "@getpaseo/plugin/client";
 import {
   nativeControlRpc,
   nativeExchangeRpc,
+  nativePresenceRpc,
   type NativeState,
   type NativeCommand,
   type NativeFrame,
 } from "../../shared/native/contracts";
 import {
   mountNativeGuest,
+  nativeDesktopBrowserApi,
   createNativeBrowserId,
   type NativeGuestController,
 } from "../workspace/web";
@@ -27,8 +29,28 @@ export class NativeDesktopService {
   readonly clientId = `desktop-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   private workspaces = new Map<string, Desktop>();
   private stopped = false;
+  private presenceTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private client: Pick<PluginClientContext, "rpc">) {}
+  /** Host remote requests even when this workspace has never been shown on desktop. */
+  start() {
+    if (this.stopped || this.presenceTimer || !nativeDesktopBrowserApi()) return;
+    const poll = async () => {
+      try {
+        const presence = await this.client.rpc(nativePresenceRpc, {});
+        if (this.stopped) return;
+        for (const workspaceId of presence.requestedWorkspaceIds) {
+          if (this.workspaces.has(workspaceId) || presence.workspaceIds.includes(workspaceId)) continue;
+          const detach = this.attach(workspaceId, null, "about:blank", () => {});
+          detach();
+        }
+      } catch (error) {
+        if (!this.stopped) console.error("Native browser startup failed", error);
+      }
+      if (!this.stopped) this.presenceTimer = setTimeout(() => void poll(), 1000);
+    };
+    this.presenceTimer = setTimeout(() => void poll(), 0);
+  }
   openDevTools(workspaceId: string) {
     const desktop = this.workspaces.get(workspaceId);
     if (!desktop || desktop.stopped) throw Error("Native browser is not ready");
@@ -206,6 +228,7 @@ export class NativeDesktopService {
   }
   dispose() {
     this.stopped = true;
+    if (this.presenceTimer) clearTimeout(this.presenceTimer);
     for (const desktop of this.workspaces.values()) {
       desktop.stopped = true;
       if (desktop.timer) clearTimeout(desktop.timer);

@@ -169,3 +169,13 @@ it('does not renew frame freshness from desktop heartbeats or rejected frame rep
   relay.exchange({ clientId: desktop, workspaceId: 'workspace', state, frame: { ...frame, sequence: 2 }, results: [] });
   expect(relay.watch('workspace', phone, 0).frame?.sequence).toBe(2);
 });
+
+
+it('announces mobile viewer demand before a desktop browser exists', () => {
+  let now = 10_000;
+  const relay = fixture(() => now);
+  relay.watch('phone-only-workspace', phone, 0);
+  expect(relay.presence()).toEqual({ workspaceIds: [], requestedWorkspaceIds: ['phone-only-workspace'] });
+  now += 3000;
+  expect(relay.presence().requestedWorkspaceIds).toEqual([]);
+});

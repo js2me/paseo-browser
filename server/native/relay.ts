@@ -60,7 +60,7 @@ export class NativeRelay {
       workspace.frame = null;
       workspace.control = null;
       workspace.takeover = null;
-      workspace.error = "Desktop browser disconnected. Reopen its native browser panel.";
+      workspace.error = "Desktop browser disconnected. Waiting for a connected desktop to host it again.";
       for (const pending of workspace.pending.values()) {
         clearTimeout(pending.timer);
         pending.reject(
@@ -79,7 +79,8 @@ export class NativeRelay {
     for (const id of this.workspaces.keys()) {
       const workspace = this.workspace(id);
       if (workspace.clientId) workspaceIds.push(id);
-      if (workspace.pending.size) requestedWorkspaceIds.push(id);
+      if (workspace.pending.size || [...workspace.viewers.values()].some(until => until > this.now()))
+        requestedWorkspaceIds.push(id);
     }
     return { workspaceIds, requestedWorkspaceIds };
   }
@@ -245,7 +246,7 @@ export class NativeRelay {
         workspace.pending.delete(command.id);
         refuse(
           Error(
-            "Native browser command timed out. Keep the desktop connected and open the browser panel. Dispatched mutations are not retried.",
+            "Native browser command timed out. Keep Paseo Desktop connected to this host so it can start the workspace browser. Dispatched mutations are not retried.",
           ),
         );
       }, 15_000);

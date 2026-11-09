@@ -57,6 +57,7 @@ export default function contribute(client: PluginClientContext) {
   });
   const sidebar = contributeSharedBrowserSidebar(client);
   const composer = contributeSharedBrowserClient(client);
+  native.start();
   return async () => {
     native.dispose();
     command();

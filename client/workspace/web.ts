@@ -491,7 +491,9 @@ export function mountNativeGuest(
     getBoundingClientRect(): { left: number; top: number; width: number; height: number };
   };
   let host = node as Anchor | null;
-  const document = host!.ownerDocument;
+  const document = host?.ownerDocument ??
+    (globalThis as unknown as { document?: Anchor["ownerDocument"] }).document;
+  if (!document) return null;
   const guest = document.createElement("webview");
   guest.setAttribute("partition", api.profilePartition);
   guest.setAttribute("src", /^https?:\/\//.test(initialUrl) ? initialUrl : "about:blank");
