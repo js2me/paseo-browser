@@ -15,7 +15,7 @@ vi.mock('./browser', async (original) => ({
 it('injects both workspace-bound MCP adapters on resume and refresh, excluding history and opt-out agents', async () => {
   let hook: ((event: { request: any }) => Promise<any>) | undefined;
   const server = {
-    registerSettings: () => ({ read: async () => ({ status: 'ready', values: browserSchema.parse({}) }) }),
+    registerSettings: () => ({ read: async () => ({ status: 'ready', values: browserSchema.parse({ mode:'workspace' }) }) }),
     handle: () => {},
     addHook: (name: string, handler: typeof hook) => { if (name === 'agent.open.before') hook = handler; return () => {}; },
   } as unknown as PluginServerContext;
@@ -45,7 +45,7 @@ it('injects both workspace-bound MCP adapters on resume and refresh, excluding h
 it('preserves user instructions and adds idempotent browser routing for newly created supported agents', async () => {
   let createHook: ((event: { request: any }) => Promise<any>) | undefined;
   const server = {
-    registerSettings: () => ({ read: async () => ({ status: 'ready', values: browserSchema.parse({}) }) }),
+    registerSettings: () => ({ read: async () => ({ status: 'ready', values: browserSchema.parse({ mode:'workspace' }) }) }),
     handle: () => {},
     addHook: (name: string, handler: typeof createHook) => { if (name === 'agent.create.before') createHook = handler; return () => {}; },
   } as unknown as PluginServerContext;
@@ -62,4 +62,17 @@ it('preserves user instructions and adds idempotent browser routing for newly cr
     await expect(createHook!({ request: { config: { ...request.config, internal: true } } })).resolves.toBeUndefined();
     await expect(createHook!({ request: { config: { ...request.config, provider: 'unsupported' } } })).resolves.toBeUndefined();
   } finally { await cleanup(); }
+});
+
+it('injects the native mailbox adapter in hybrid mode without launching a second Chrome',async()=>{
+ let hook:((event:{request:any})=>Promise<any>)|undefined;
+ const server={registerSettings:()=>({read:async()=>({status:'ready',values:browserSchema.parse({mode:'hybrid'})})}),handle:()=>{},addHook:(name:string,handler:typeof hook)=>{if(name==='agent.open.before')hook=handler;return()=>{};}} as unknown as PluginServerContext;
+ const cleanup=contribute(server);
+ try{
+  const request={agentId:'native-agent',workspaceId:'workspace',cwd:'/project',provider:'codex',purpose:'interactive',reason:'refresh',labels:{},env:{ORIGINAL:'kept'},mcpServers:{existing:{type:'http',url:'https://example.com'},'paseo-browser-devtools':{type:'stdio',command:'old'}}};
+  const result=await hook!({request});
+  expect(result.env).toEqual(request.env);expect(result.mcpServers.existing).toEqual(request.mcpServers.existing);
+  expect(result.mcpServers['paseo-browser-devtools']).toBeUndefined();
+  const browser=result.mcpServers['paseo-browser'];expect(browser.args[0]).toMatch(/native-browser-mcp.cjs$/);expect(browser.env.PASEO_BROWSER_NATIVE_URL).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/call$/);expect(browser.env.PASEO_BROWSER_NATIVE_TOKEN).toHaveLength(43);
+ }finally{await cleanup();}
 });

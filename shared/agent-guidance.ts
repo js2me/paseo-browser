@@ -12,3 +12,10 @@ export function withBrowserGuidance(prompt?: string): string {
   if (prompt?.includes(marker)) return prompt;
   return [prompt?.trim(), BROWSER_AGENT_INSTRUCTIONS].filter(Boolean).join('\n\n');
 }
+
+export function withNativeBrowserGuidance(prompt?: string): string {
+  const nativeMarker = '[paseo-browser native integration]';
+  if (prompt?.includes(nativeMarker)) return prompt;
+  return [prompt?.trim(), `${nativeMarker}
+Use the paseo-browser native MCP tools for browser tasks. native_browser_open opens a real Chromium WebView inside the desktop workspace browser panel; the mobile panel broadcasts that exact guest. Keep the desktop connected. Call shared_browser_acquire_control before navigation, JavaScript, CDP or cookies, and shared_browser_release_control afterward. Use native_browser_automation for snapshots, forms, input, screenshots and network/console logs. Use evaluate_script for JavaScript, browser_cookies for cookie import/export, and cdp_send/cdp_events for full protocol access when the desktop native bridge is installed. Native mode never launches a separate daemon Chrome. If the desktop or bridge is unavailable, report that specific condition; do not silently switch to the legacy streamed browser. Never force control from a human.`].filter(Boolean).join('\n\n');
+}

@@ -30,7 +30,8 @@ export function BrowserSettingsScreen({ theme }: PluginSurfaceProps) {
     <SettingsSection title="Connection"><SettingsCard>
       <SettingsSwitch label="Enable Chrome tools" value={values.enabled} onValueChange={(enabled) => update({ enabled })} />
       <SettingsSelect label="Browser mode" value={values.mode} options={[
-        { label: 'Shared workspace browser', value: 'workspace' },
+        { label: 'Native desktop + mobile broadcast', value: 'hybrid' },
+        { label: 'Legacy daemon Chrome stream', value: 'workspace' },
         { label: 'Separate Chrome per agent', value: 'isolated' },
         { label: 'My running Chrome (144+)', value: 'autoConnect' },
         { label: 'Chrome debugging endpoint', value: 'endpoint' },
@@ -38,6 +39,7 @@ export function BrowserSettingsScreen({ theme }: PluginSurfaceProps) {
       {values.mode === 'isolated' && <SettingsSwitch label="Headless" value={values.headless} onValueChange={(headless) => update({ headless })} />}
     </SettingsCard></SettingsSection>
     {values.mode === 'isolated' && field('Chrome executable (empty = automatic)', values.executablePath, (executablePath) => update({ executablePath }))}
+    {values.mode === 'hybrid' && <Text style={foreground}>Desktop renders a native Chromium WebView. Mobile receives a live broadcast of that exact guest. Keep the desktop panel open. Full CDP/cookie tools require the desktop bridge patch shipped with this plugin.</Text>}
     {values.mode === 'workspace' && <Text style={foreground}>One browser per workspace, visible in the Workspace Browser panel on desktop and mobile. Logins persist. Take and release control to hand the browser between humans and agents.</Text>}
     {values.mode === 'endpoint' && field('Chrome debugging URL', values.browserUrl, (browserUrl) => update({ browserUrl }))}
     {values.mode === 'autoConnect' && <Text style={foreground}>Enable remote debugging at chrome://inspect/#remote-debugging in Chrome 144 or newer, then approve Chrome’s connection prompt. Agents can access your existing tabs and signed-in sites.</Text>}

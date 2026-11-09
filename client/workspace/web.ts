@@ -303,9 +303,7 @@ export interface BrowserVideoCanvasNode {
     addEventListener(type: string, listener: () => void): void;
     removeEventListener(type: string, listener: () => void): void;
     defaultView: {
-      IntersectionObserver: new (
-        callback: (entries: { isIntersecting: boolean }[]) => void,
-      ) => {
+      IntersectionObserver: new (callback: (entries: { isIntersecting: boolean }[]) => void) => {
         observe(node: BrowserVideoCanvasNode): void;
         disconnect(): void;
       };
@@ -402,4 +400,354 @@ export function bindBrowserVideoVisibility(
     view?.removeEventListener("pagehide", hide);
     view?.removeEventListener("pageshow", show);
   };
+}
+
+// Native plugin webviews use the same validated guest registration as Paseo's built-in panes.
+interface NativeDesktopBrowserApi {
+  profilePartition: string;
+  registerAttachedBrowser(input: {
+    browserId: string;
+    workspaceId: string;
+    webContentsId: number;
+  }): Promise<unknown>;
+  unregisterWorkspaceBrowser(browserId: string): Promise<unknown>;
+  executeAutomationCommand(
+    input: unknown,
+  ): Promise<{ ok: boolean; result?: unknown; error?: { message: string } }>;
+  captureNativeFrame?(input: {
+    browserId: string;
+    workspaceId: string;
+    notBefore?: number;
+  }): Promise<{ data: string; width: number; height: number; capturedAt: number } | null>;
+  sendNativeCommand?(input: {
+    browserId: string;
+    workspaceId: string;
+    method: string;
+    params: Record<string, unknown>;
+  }): Promise<unknown>;
+  readNativeEvents?(input: {
+    browserId: string;
+    workspaceId: string;
+    method?: string;
+    clear?: boolean;
+  }): Promise<unknown>;
+}
+export function nativeDesktopBrowserApi(): NativeDesktopBrowserApi | null {
+  if (Platform.OS !== "web") return null;
+  const host = (globalThis as unknown as { paseoDesktop?: { browser?: NativeDesktopBrowserApi } })
+    .paseoDesktop?.browser;
+  return host && typeof host.registerAttachedBrowser === "function" ? host : null;
+}
+interface NativeGuest {
+  style: Record<string, string>;
+  getBoundingClientRect(): { width: number; height: number };
+  setAttribute(name: string, value: string): void;
+  addEventListener(name: string, listener: () => void): void;
+  remove(): void;
+  getWebContentsId(): number;
+  getURL(): string;
+  getTitle(): string;
+  canGoBack(): boolean;
+  canGoForward(): boolean;
+  loadURL(url: string): Promise<void>;
+  goBack(): void;
+  goForward(): void;
+  reload(): void;
+  executeJavaScript(code: string): Promise<unknown>;
+  capturePage(): Promise<{
+    getSize(): { width: number; height: number };
+    toJPEG(quality: number): Uint8Array;
+    resize(size: { width: number }): {
+      getSize(): { width: number; height: number };
+      toJPEG(quality: number): Uint8Array;
+    };
+  }>;
+  sendInputEvent(input: Record<string, unknown>): void;
+}
+export interface NativeGuestController {
+  state(): import("../../shared/native/contracts").NativeState | null;
+  capture(sequence: number): Promise<import("../../shared/native/contracts").NativeFrame | null>;
+  execute(command: import("../../shared/native/contracts").NativeCommand): Promise<unknown>;
+  inputEnabled(enabled: boolean): void;
+  present(node: unknown | null): void;
+  dispose(): void;
+}
+export function mountNativeGuest(
+  node: unknown,
+  workspaceId: string,
+  browserId: string,
+  onError: (error: string) => void,
+  initialUrl = "about:blank",
+): NativeGuestController | null {
+  const api = nativeDesktopBrowserApi();
+  if (!api) return null;
+  type Anchor = {
+    ownerDocument: {
+      createElement(tag: string): NativeGuest;
+      body: { appendChild(guest: NativeGuest): void };
+    };
+    getBoundingClientRect(): { left: number; top: number; width: number; height: number };
+  };
+  let host = node as Anchor | null;
+  const document = host!.ownerDocument;
+  const guest = document.createElement("webview");
+  guest.setAttribute("partition", api.profilePartition);
+  guest.setAttribute("src", /^https?:\/\//.test(initialUrl) ? initialUrl : "about:blank");
+  guest.setAttribute("allowpopups", "");
+  guest.style.backgroundColor = "#ffffff";
+  guest.style.flex = "1";
+  guest.style.width = "100%";
+  guest.style.height = "100%";
+  guest.style.pointerEvents = "none";
+  let ready = false;
+  let disposed = false;
+  let generation = 0;
+  let size = { width: 1280, height: 800 };
+  let lastCapture = 0;
+  let changedAt = 0;
+  const register = async () => {
+    try {
+      await api.registerAttachedBrowser({
+        browserId,
+        workspaceId,
+        webContentsId: guest.getWebContentsId(),
+      });
+      if (!disposed) ready = true;
+    } catch (error) {
+      onError(String(error));
+    }
+  };
+  guest.addEventListener("dom-ready", () => void register());
+  guest.addEventListener("did-navigate", () => {
+    generation++;
+    changedAt = Date.now() + 50;
+  });
+  let inputEnabled = false;
+  let lastBounds = { width: 1280, height: 800 };
+  const position = () => {
+    const bounds = host?.getBoundingClientRect();
+    const visible = Boolean(bounds && bounds.width > 0 && bounds.height > 0);
+    if (bounds && visible)
+      lastBounds = { width: Math.round(bounds.width), height: Math.round(bounds.height) };
+    Object.assign(guest.style, {
+      position: "fixed",
+      left: visible ? `${bounds!.left}px` : "0px",
+      top: visible ? `${bounds!.top}px` : "0px",
+      width: `${lastBounds.width}px`,
+      height: `${lastBounds.height}px`,
+      zIndex: visible?"1":"-1",
+      clipPath: "none",
+      pointerEvents: visible && inputEnabled ? "auto" : "none",
+    });
+  };
+  position();
+  document.body.appendChild(guest);
+  const state = () => {
+    if (!ready || disposed) return null;
+    try {
+      position();
+      const bounds = guest.getBoundingClientRect();
+      const next = { width: Math.round(bounds.width), height: Math.round(bounds.height) };
+      if (next.width !== size.width || next.height !== size.height) {
+        generation++;
+        changedAt = Date.now() + 50;
+      }
+      size = next;
+      return {
+        browserId,
+        url: guest.getURL(),
+        title: guest.getTitle(),
+        width: size.width,
+        height: size.height,
+        generation,
+        canGoBack: guest.canGoBack(),
+        canGoForward: guest.canGoForward(),
+        cdp:
+          typeof api.sendNativeCommand === "function" &&
+          typeof api.captureNativeFrame === "function",
+      };
+    } catch {
+      return null;
+    }
+  };
+  const cdp = async (method: string, params: Record<string, unknown> = {}) => {
+    if (!api.sendNativeCommand)
+      throw Error(
+        "Full CDP requires the Paseo native browser bridge. Install the desktop bridge patch included with this plugin.",
+      );
+    return api.sendNativeCommand({ browserId, workspaceId, method, params });
+  };
+  return {
+    state,
+    async capture(sequence) {
+      if (!ready || disposed) return null;
+      if (!api.captureNativeFrame)
+        throw Error("Mobile broadcast requires the Paseo desktop native bridge update.");
+      const before = generation;
+      const frame = await api.captureNativeFrame({ browserId, workspaceId, notBefore: changedAt });
+      if (!frame || disposed || before !== generation || frame.capturedAt <= lastCapture)
+        return null;
+      lastCapture = frame.capturedAt;
+      return { ...frame, sequence, generation, browserId };
+    },
+    async execute(command) {
+      if (!ready || disposed) throw Error("Native browser is not ready");
+      const input = command.input;
+      if (command.operation === "tabs.list") return { tabs: [state()] };
+      if (command.operation === "open" || command.operation === "navigate") {
+        const url = new URL(String(input.url));
+        if (!["http:", "https:"].includes(url.protocol))
+          throw Error("Only HTTP(S) URLs are supported");
+        await guest.loadURL(url.href);
+        return state();
+      }
+      if (command.operation === "back") {
+        guest.goBack();
+        return state();
+      }
+      if (command.operation === "forward") {
+        guest.goForward();
+        return state();
+      }
+      if (command.operation === "reload") {
+        guest.reload();
+        return state();
+      }
+      if (command.operation === "evaluate")
+        return guest.executeJavaScript(String(input.expression));
+      if (command.operation === "input") {
+        if (input.browserId !== browserId)
+          throw Error("Browser tab changed; wait for its current frame");
+        if (input.generation !== generation)
+          throw Error("Page changed; wait for a fresh frame before interacting");
+        if (input.kind === "type") {
+          if (typeof input.text !== "string" || input.text.length > 4000)
+            throw Error("Invalid browser text");
+          return cdp("Input.insertText", { text: input.text });
+        }
+        if (input.kind === "key") {
+          if (
+            input.key !== "Enter" &&
+            input.key !== "Tab" &&
+            input.key !== "Backspace" &&
+            input.key !== "Escape"
+          )
+            throw Error("Unsupported key");
+          const code = { Enter: 13, Tab: 9, Backspace: 8, Escape: 27 }[input.key];
+          await cdp("Input.dispatchKeyEvent", {
+            type: "keyDown",
+            key: input.key,
+            windowsVirtualKeyCode: code,
+          });
+          return cdp("Input.dispatchKeyEvent", {
+            type: "keyUp",
+            key: input.key,
+            windowsVirtualKeyCode: code,
+          });
+        }
+        if (typeof input.x !== "number" || typeof input.y !== "number")
+          throw Error("Invalid input coordinates");
+        const x = Math.round(input.x);
+        const y = Math.round(input.y);
+        if (
+          !Number.isFinite(x) ||
+          !Number.isFinite(y) ||
+          x < 0 ||
+          y < 0 ||
+          x > size.width ||
+          y > size.height
+        )
+          throw Error("Invalid input coordinates");
+        await cdp("Input.dispatchMouseEvent", {
+          type: "mousePressed",
+          x,
+          y,
+          button: "left",
+          clickCount: 1,
+        });
+        await cdp("Input.dispatchMouseEvent", {
+          type: "mouseReleased",
+          x,
+          y,
+          button: "left",
+          clickCount: 1,
+        });
+        return {};
+      }
+      if (command.operation === "cdp_send")
+        return cdp(String(input.method), (input.params ?? {}) as Record<string, unknown>);
+      if (command.operation === "cdp_events") {
+        if (!api.readNativeEvents) throw Error("Desktop native CDP bridge is unavailable");
+        return api.readNativeEvents({
+          browserId,
+          workspaceId,
+          method: typeof input.method === "string" ? input.method : undefined,
+          clear: input.clear !== false,
+        });
+      }
+      if (command.operation === "browser_cookies") {
+        if (input.action === "get") return cdp("Network.getAllCookies");
+        if (input.action === "set") return cdp("Network.setCookies", { cookies: input.cookies });
+        if (input.action === "clear") return cdp("Network.clearBrowserCookies");
+        if (input.action === "delete") {
+          const { action: _, ...params } = input;
+          return cdp("Network.deleteCookies", params);
+        }
+        throw Error("Unknown cookie action");
+      }
+      if (command.operation === "automation") {
+        const result = await api.executeAutomationCommand({
+          type: "browser.automation.execute.request",
+          requestId: command.id,
+          workspaceId,
+          ...(typeof input.cwd === "string" ? { cwd: input.cwd } : {}),
+          command: {
+            command: input.name,
+            args: { ...((input.args as Record<string, unknown>) ?? {}), browserId },
+          },
+        });
+        if (!result.ok) throw Error(result.error?.message ?? "Native automation failed");
+        return result.result;
+      }
+      throw Error(`Unknown native browser operation: ${command.operation}`);
+    },
+    inputEnabled(enabled) {
+      inputEnabled = enabled;
+      position();
+    },
+    present(node) {
+      host = node as Anchor | null;
+      position();
+    },
+    dispose() {
+      disposed = true;
+      ready = false;
+      guest.remove();
+      void api.unregisterWorkspaceBrowser(browserId).catch(() => {});
+    },
+  };
+}
+
+/** React Native Web Pressable preserves MouseEvent client coordinates, not locationX/Y. */
+export function nativeTouchPoint(event: unknown, node: unknown): { x: number; y: number } | null {
+  const source = (
+    event as {
+      nativeEvent?: { clientX?: number; clientY?: number; locationX?: number; locationY?: number };
+    }
+  ).nativeEvent;
+  if (!source) return null;
+  if (Platform.OS === "web") {
+    const target = node as { getBoundingClientRect?(): { left: number; top: number } } | null;
+    const rect = target?.getBoundingClientRect?.();
+    if (rect && typeof source.clientX === "number" && typeof source.clientY === "number")
+      return { x: source.clientX - rect.left, y: source.clientY - rect.top };
+  }
+  return typeof source.locationX === "number" && typeof source.locationY === "number"
+    ? { x: source.locationX, y: source.locationY }
+    : null;
+}
+
+export function createNativeBrowserId(): string {
+  const crypto = (globalThis as unknown as { crypto?: { randomUUID?(): string } }).crypto;
+  return crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }

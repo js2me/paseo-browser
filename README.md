@@ -1,105 +1,77 @@
-# paseo-browser
+# Paseo Browser
 
-Shared Chrome for Paseo workspaces, with a live desktop/mobile panel and the full default Chrome DevTools MCP toolset for agents.
+Native Chromium in Paseo Desktop, with a live mobile broadcast of the same browser session. Agents and people use the same tabs, cookies and page state.
 
-## Setup
+## Native desktop and mobile
 
-Requires Paseo >=0.15.0 and Node.js >=24 on the daemon machine.
+The default `hybrid` mode embeds an actual Electron WebView in the workspace panel. Desktop rendering, keyboard, mouse and scrolling run in Chromium. Mobile and browser clients receive MJPEG frames from that exact guest through authenticated Paseo plugin RPCs. The desktop remains the browser host; websites and `localhost` URLs run on that desktop.
+
+Remote capture starts only when a viewer is watching. It publishes the latest frame with no playback backlog, bounds frames to 1280 × 960 at JPEG quality 65, and requests approximately 15 updates per second. Closing the desktop panel parks its native guests without destroying them, so mobile viewing can continue. The desktop application must remain connected. iOS and Android use their native image component for the JPEG stream.
+
+Each workspace supports eight native tabs. Take and release control to pass the browser between a person and agents. Native agent tools wait for an in-flight command before a human takeover and reject commands whose lease changed. Dispatched mutations are never automatically retried. Mobile taps target the desktop viewport; the text controls send input to the focused page field.
+
+Native tabs use `persist:paseo-browser`, the same profile as Paseo's built-in browser. Cookies and logins are shared across native workspace tabs. This is independent of the legacy daemon Chrome profiles.
+
+## Desktop bridge setup
+
+Paseo's existing desktop WebView APIs support native rendering. Mobile frame capture and full guest CDP require the bridge included in `integrations/paseo/`. Older desktops show an update message.
+
+On Linux, prepare a separate copy of your existing desktop AppDir:
 
 ```sh
-npm ci
-npm run typecheck
-npm run install:agent-skill
-paseo plugin install /absolute/path/to/paseo-browser
-paseo plugin ls
+npm run prepare:native-desktop -- --source /path/to/Paseo-AppDir --destination /new/path/paseo-native
 ```
 
-Preparation installs a pinned `agent-browser` runtime, stages Chrome, discovers the pinned DevTools tools and builds the supervisor and MCP adapters. Installed Google Chrome/Chromium is preferred on Linux and macOS; otherwise preparation downloads Chrome for Testing. Linux ARM64 requires native non-Snap Chromium. No npx package download happens during an agent launch.
+This copies the application, updates its ASAR browser bridge, preserves native dependencies and leaves the running app and daemon untouched. The destination must not already exist. Close the original desktop before launching `/new/path/paseo-native/run-native-paseo`. Use the normal sandbox flags for your installation. Do not restart a desktop-managed daemon while agents are running without arranging that interruption.
 
-If `paseo` starts the desktop app instead of the CLI, use `npx --yes --package=@getpaseo/cli@0.15.0 paseo` for the commands above.
+For a source build, apply `integrations/paseo/native-bridge.patch` to the documented Paseo revision and build its desktop package. See [bridge details](integrations/paseo/README.md).
 
-When the displayed workspace has a running shared browser, its header or composer automatically reveals the live browser in the Explorer side panel beside the agent chat. You can also use **Open Workspace Browser** in the Command Center or the browser button in the workspace header. Existing browser sessions also appear in the sidebar and composer. All these entry points target the side panel. The automatic reveal runs once per live browser on each client; closing the panel manually is respected until that browser is closed and reopened. Background workspaces do not request a panel reveal through their inactive headers or composers. On phones, the composer triggers the reveal even when header buttons are hidden in the workspace menu. Use **Take control** and **Release** to hand control between a person and agents. The address bar, tabs, mouse, keyboard and touch all act on the daemon-hosted Chrome. Compact layouts support text composition, viewport presets and mobile emulation. Fit/actual-size/fill modes, capture density and quality are available through display options.
+Install the plugin on the daemon:
 
-## Agent tools and shared state
+```sh
+npm install
+npm run typecheck
+paseo plugin install /absolute/path/to/paseo-browser
+```
 
-Workspace mode is the default for installations without saved connection preferences. Agents receive two local MCP servers:
+Open **Open Workspace Browser** in the Command Center or the browser composer/header button. Agent browser requests reveal the panel in the displayed workspace. The phone shows the native desktop's broadcast. A workspace whose desktop browser is not available reports that condition instead of opening an independent Chrome.
 
-- `paseo-browser`: 11 `shared_browser_*` tools for state, screenshots, control leases, tabs, navigation, input and viewport.
-- `paseo-browser-devtools`: 35 tools: the 32 default Chrome DevTools tools plus `browser_cookies`, `cdp_send` and `cdp_events`.
+## Agent tools
 
-Both operate on the same Chrome profile and pages shown in the panel. The DevTools server stays behind the workspace supervisor; agents receive workspace-bound credentials, not an unrestricted debugging endpoint. Upstream tool schemas are discovered from the installed, pinned MCP package during preparation.
+Native mode injects the `paseo-browser` MCP adapter:
 
-`browser_cookies` reads/exports, imports/sets, deletes and clears profile cookies, including HttpOnly, Secure, SameSite, expiry and partition keys. `cdp_send` exposes arbitrary Chrome DevTools Protocol commands; obtain page target IDs with `Target.getTargets`. Persistent target sessions support DOM, debugger, network interception, browser permissions, emulation, IndexedDB and storage. `cdp_events` drains a bounded 500-event buffer, filtered by target/method. Enable the appropriate protocol domain first and finish intercepted requests or resume paused scripts before releasing control. Chrome applies its normal protocol and cookie validation. These additional tools are available in workspace mode.
+- `native_browser_open`, `shared_browser_status`, control acquire/release, navigation and native tab tools.
+- `native_browser_automation` for snapshots, click/fill/type, keyboard, wait, screenshot, upload/select, hover/drag, console/network logs, scrolling and resizing.
+- `evaluate_script` for page JavaScript.
+- `browser_cookies` for import/export, setting, deletion and clearing, including HttpOnly/Secure attributes.
+- `cdp_send` and `cdp_events` for guest CDP domains and bounded protocol events.
 
-Example request:
+Acquire control before actions and release afterward. `native_browser_automation` takes `{ name, args }`; use element refs from its current `snapshot`. Native browser IDs come from `shared_browser_tabs`. Browser-level commands cannot close or crash Paseo; manage native tabs through the dedicated tab tools. Cookie and protocol rules are enforced by Chromium. Native CDP is scoped to the registered guest and its owning window/workspace. Uploads use the desktop's filesystem and Paseo's workspace path checks.
 
-> Use the shared workspace browser. Acquire control, inspect the login form, fill it, submit, check the network and console, then release control so I can continue.
+The managed skill under `agent-skills/paseo-browser` is installed into the local agent skill directories. Existing agent sessions need reloading to discover the native adapter. Unrelated MCP servers and user prompts are preserved.
 
-Agents cannot force a human to relinquish a tab. DevTools can modify multiple tabs, so every DevTools call requires control of the agent's selected tab and refuses while any other participant controls another tab. Control acquisition and browser policy actions serialize with that call. A human takeover waits for an already-dispatched tool to complete, bounded by a 20-second MCP timeout. Interrupted mutations are not retried.
+## Other connection modes
 
-Each viewer and agent selects tabs independently. DevTools uses explicit `pageId` values from `list_pages`. Shared tools use tab IDs from `shared_browser_tabs`. If DevTools closes an agent's selected tab, select a remaining shared tab and acquire control again. Use panel/shared viewport controls for the canonical displayed viewport; separate CDP sessions may override emulation settings.
-
-Cookies and local storage persist under `$PASEO_HOME/plugin-data/paseo-browser/profiles/`. Closing a panel keeps Chrome running. **Close shared browser** stops that workspace browser; reopening retains its profile. Archiving closes the browser and retains its profile. Profiles are local to the daemon machine, separate from personal Chrome profiles. All authorized Paseo clients of the daemon can view shared browser sessions. Panel clipboard sync, native file-transfer dialogs, media permissions, extension management and passkeys are not provided. Agents can use DevTools file-upload tools.
-
-## Connection settings
-
-Open **Settings → Plugins → Chrome browser → settings**, or find **Chrome browser settings** in the Command Center.
-
-| Mode | Behavior |
+| Mode | Browser and viewing |
 | --- | --- |
-| Shared workspace browser | One persistent Chrome per workspace, viewed inside Paseo and used by both MCP servers. |
-| Separate Chrome per agent | Visible or headless Chrome with a temporary profile; independent DevTools sessions. |
-| My running Chrome | Chrome 144+; enable `chrome://inspect/#remote-debugging` and approve Chrome's connection prompt. Uses existing tabs and logins. |
-| Chrome debugging endpoint | Connect DevTools to an already debuggable Chrome, such as `http://127.0.0.1:9222`. |
+| `hybrid` | Native desktop WebView; same guest broadcast to mobile. Default for new settings. |
+| `workspace` | Legacy persistent Chrome on the daemon, viewed as a stream on every client. 11 shared tools plus 35 DevTools tools. |
+| `isolated` | Independent Chrome per agent, visible or headless. |
+| `autoConnect` | Personal Chrome 144+ with remote debugging enabled and its connection approved. |
+| `endpoint` | An existing Chrome debugging endpoint. |
 
-Existing saved connection modes are preserved. The workspace panel always shows the workspace-owned browser; standalone connection modes are independent of that panel. Save settings and run `paseo plugin reload paseo-browser` to apply mode changes to existing sessions before their next idle prompt. Active turns continue. New sessions read saved settings immediately. The daemon does not need a restart.
+Legacy workspace cookies and localStorage remain under `$PASEO_HOME/plugin-data/paseo-browser/profiles/`. Chrome MCP usage statistics and CrUX reporting are disabled. Legacy code and its MIT attribution remain in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
 
-Default provider IDs are `codex`, `claude`, `copilot`, and `opencode`. Additional providers must support injected MCP servers. Agent label `paseo-browser/enabled=false` disables its tools. No permission policy or provider sandbox setting is changed. Separate-browser executable, headless and Chrome-argument settings apply only to separate mode.
-
-The workspace runtime accepts these host environment overrides:
-
-| Variable | Purpose |
-| --- | --- |
-| `PASEO_BROWSER_WORKSPACE_CHROMIUM_EXECUTABLE` | Absolute path to Chrome/Chromium; also used during preparation. |
-| `PASEO_BROWSER_WORKSPACE_CHROMIUM_ARGS` | Additional Chromium arguments, comma separated. |
-| `PASEO_BROWSER_WORKSPACE_XVFB=1` | Optional private Linux virtual display for headed browser media behavior. |
-| `PASEO_BROWSER_WORKSPACE_VIDEO=1` | Optional encoded-video transport; image streaming remains the default. |
-
-Browser execution and networking happen on the daemon host. Google MCP usage statistics and CrUX URL reporting are disabled. Chrome privacy settings remain independent. Standalone personal-Chrome mode exposes existing signed-in sites to agents. Workspace DevTools file access is rooted at the working directory of the first agent to open its DevTools connection; use one workspace per checkout.
-
-## Development and tests
+## Validation
 
 ```sh
 npm run typecheck
 npm test
-npm run test:workspace
-npm run test:chrome
 npm run test:shared
 npm run test:ui
+PASEO_ELECTRON_BINARY=/path/to/electron npm run test:native
 ```
 
-- Unit/regression coverage includes the inherited workspace browser tests and the integration's settings and launch hooks.
-- `test:chrome` runs the standalone Chrome tools against a local form fixture.
-- `test:shared` runs a real isolated Chrome, two viewer connections and both MCP adapters. It checks HttpOnly/Secure cookie import/export/deletion, cookie delivery to HTTP requests, raw CDP, protocol events, network interception, human priority, cross-tab DevTools fencing, form input, shared screenshots, console/network, tab operations and persisted cookies/localStorage after a complete supervisor/browser restart.
-- `test:ui` mounts the actual panel in a test host with React Native Web and real RPC/browser data. It checks automatic side-panel reveal beside the conversation, live frames, acquire/release and overflow at desktop/phone dimensions in dark/light themes; screenshots go to `artifacts/`. Host-only UI primitives are substituted in this harness, so it complements checking the panel inside Paseo. This does not claim validation on physical iOS/Android hardware.
+The native integration test uses a separate Electron process and profile, real WebViews and CDP, a real MCP adapter, and a phone-sized Chrome client. It checks native snapshots/screenshots/tabs, HttpOnly cookies, mobile touch, lease fencing, and fresh frames while the desktop pane is parked. Set `PASEO_CHECKOUT` to the Paseo source checkout containing the bridge patch; it defaults to `../paseo`. This validates a compact web client, not physical iOS/Android hardware.
 
-Browser smoke tests use `/usr/bin/google-chrome` on Linux and temporary profiles, never personal browsing data. `PASEO_BROWSER_TEST_NO_SANDBOX=1` is an explicit opt-out available only for the standalone smoke test on sandbox-limited CI; the plugin does not add it automatically.
-
-```sh
-npm run postinstall
-paseo plugin reload paseo-browser
-paseo plugin logs paseo-browser
-npm pack --dry-run --ignore-scripts
-```
-
-Re-run preparation after moving a directory installation. `server/runtime.json` records local paths and is regenerated on installation; Git/npm manifest preparation explicitly runs the same steps because Paseo suppresses package lifecycle scripts.
-
-Workspace streaming, control and profile code is adapted from `@omercnet/paseo-shared-browser` 4.1.0 under MIT. See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for the original notice and source. Our runtime paths are independent, so an installed `shared-browser` plugin is not modified.
-
-## Agent chooses CUA instead of Paseo Browser
-
-CUA and its browser access host are a different integration. A CUA host error does not mean this plugin failed. Discover `paseo_browser` / `shared_browser` MCP tools, acquire control, then navigate with this plugin.
-
-The package includes the `paseo-browser` agent skill. Git/npm plugin preparation installs it into `~/.agents/skills/paseo-browser`, with a Codex skills link. For directory installations, run `npm run install:agent-skill`. Existing user-authored skills at that path are preserved. Remove those skill paths if uninstalling the plugin and the guidance is no longer wanted.
-
-Both workspace MCP adapters advertise browser-routing instructions during initialization. Newly created supported agents also receive a short routing section appended to their existing system prompt. That saved section is conditional on the tools being available and does not authorize extra browser actions. Reload an existing idle agent after installing/updating the skill so its tool and skill catalogs refresh.
+`test:shared` and `test:ui` cover the retained legacy browser mode. Generated runtimes, local machine paths, node_modules and screenshots are excluded from the package or Git as appropriate.

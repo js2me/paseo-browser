@@ -6,7 +6,7 @@ export function chromeEntry(): string {
 }
 
 export function browserServer(settings: BrowserSettings, nodePath: string, workspaceRoot?: string) {
-  if (settings.mode === 'workspace') throw new Error('Workspace mode uses the shared supervisor MCP adapters');
+  if (settings.mode === 'workspace' || settings.mode === 'hybrid') throw new Error('Workspace mode uses the shared supervisor MCP adapters');
   const args = [chromeEntry(), '--no-usage-statistics', '--no-performance-crux'];
   if (workspaceRoot) args.push(`--filesystemRoot=${workspaceRoot}`);
   if (settings.mode === 'isolated') {

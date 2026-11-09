@@ -9,6 +9,18 @@ Use `paseo-browser` / `paseo-browser-devtools` MCP tools when they are available
 
 Discover the exact tool names before choosing a browser backend. In code-mode, filter `ALL_TOOLS` by `paseo_browser` or `shared_browser`, then invoke the matching functions on `tools`. Typical names include `mcp__paseo_browser__shared_browser_status` and `mcp__paseo_browser_devtools__list_pages`.
 
+When `native_browser_open` is available, use native mode (the default):
+
+1. Call `native_browser_open` with the site's HTTP(S) URL. This opens the real desktop WebView; a mobile viewer sees that exact guest. Keep Paseo Desktop connected. Its panel may be parked while the phone is watching.
+2. Acquire `shared_browser_acquire_control`, then use `native_browser_automation` with `{ name: "snapshot", args: {} }` to obtain native element refs. Use the same tool for click/fill/type/keyboard, wait, upload, screenshot, hover/drag, logs, scroll and resize.
+3. Use `evaluate_script` for JavaScript, `browser_cookies` for cookies, and `cdp_send`/`cdp_events` for the registered guest's protocol. Full CDP and mobile sharing require the desktop bridge update. Report that specific missing capability if needed.
+4. Use `shared_browser_tabs`, `shared_browser_tab_open`, `shared_browser_tab_select` and `shared_browser_tab_close` for native tabs. Native profile cookies are shared with Paseo's other native tabs.
+5. Release control after the action. Never force control from a person. Dispatched mutations are not automatically retried.
+
+The desktop runs the website. On a remote daemon, localhost refers to the connected desktop for native browsing. File uploads require files available on that desktop. If no desktop is connected, report it; do not silently start a separate daemon browser and claim it is the native session.
+
+The following instructions apply to the legacy `workspace` adapter, which lacks `native_browser_open`:
+
 For a request such as “open google.com in the browser”:
 
 1. Call `shared_browser_status` and acquire control with `shared_browser_acquire_control`.

@@ -3,7 +3,7 @@ import { z } from 'zod';
 
 export const browserSchema = z.object({
   enabled: z.boolean().default(true),
-  mode: z.enum(['workspace', 'isolated', 'autoConnect', 'endpoint']).default('workspace'),
+  mode: z.enum(['hybrid', 'workspace', 'isolated', 'autoConnect', 'endpoint']).default('hybrid'),
   headless: z.boolean().default(false),
   executablePath: z.string().default(''),
   browserUrl: z.string().default('http://127.0.0.1:9222'),

@@ -73,6 +73,7 @@ async function bundleRuntimeEntries() {
   await build({
     entryPoints: {
       supervisor: supervisorEntry,
+      "native-browser-mcp": join(projectRoot, "server", "native", "mcp-entry.ts"),
       "devtools-mcp": join(projectRoot, "server", "workspace", "devtools-mcp-entry.ts"),
       "shared-browser-mcp": mcpEntry,
     },

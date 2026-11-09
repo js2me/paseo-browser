@@ -14,7 +14,7 @@ it('registers one header per workspace and targets Explorer without opening back
     openPanel: vi.fn(),
     addHeaderButton: vi.fn(() => ({ remove: headerRemove })),
     addComposerPill: vi.fn(() => ({ remove: pillRemove })),
-    rpc: vi.fn(async () => ({ workspaceIds: ['workspace'] })),
+    rpc: vi.fn(async () => ({ workspaceIds: ['workspace'], requestedWorkspaceIds: [] })),
     paseo: { agents: { list: vi.fn(async () => ({ subscription: {
       release,
       subscribe: (next: any) => { handlers = next; return vi.fn(); },
@@ -25,6 +25,7 @@ it('registers one header per workspace and targets Explorer without opening back
     await vi.waitFor(() => expect(handlers).toBeDefined());
     handlers.snapshot({ entries: [{ agent: { id: 'one', workspaceId: 'workspace' } }, { agent: { id: 'two', workspaceId: 'workspace' } }], pageInfo: { hasMore: false } });
     await vi.waitFor(() => expect(client.addHeaderButton).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(client.addComposerPill).toHaveBeenCalledTimes(2));
     expect(client.openPanel).not.toHaveBeenCalled();
     const pill = vi.mocked(client.addComposerPill).mock.calls[0][0];
     expect(pill.button.icon).toBe(vi.mocked(client.addHeaderButton).mock.calls[0][0].button.icon);

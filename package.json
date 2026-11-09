@@ -1,6 +1,6 @@
 {
   "name": "paseo-browser",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Chrome browser tools for Paseo agents",
   "type": "module",
   "license": "MIT",
@@ -19,18 +19,21 @@
     "THIRD_PARTY_LICENSES.md",
     "!**/*.test.ts",
     "!**/*.test.tsx",
-    "agent-skills"
+    "agent-skills",
+    "integrations"
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/*.test.ts && vitest run client/workspace server/workspace shared/workspace",
+    "test": "tsx --test tests/*.test.ts && vitest run client/workspace server/workspace server/native shared/workspace",
     "test:chrome": "tsx tests/chrome-smoke.ts",
     "postinstall": "node server/prepare.mjs && node server/workspace/prepare-runtime.mjs",
     "test:workspace": "vitest run client/workspace server/workspace shared/workspace",
     "prepare:workspace": "node server/workspace/prepare-runtime.mjs",
     "test:shared": "tsx tests/workspace-smoke.ts",
     "test:ui": "tsx tests/ui-smoke.ts",
-    "install:agent-skill": "node server/install-agent-skill.mjs"
+    "install:agent-skill": "node server/install-agent-skill.mjs",
+    "test:native": "tsx tests/native-smoke.ts",
+    "prepare:native-desktop": "node server/native/patch-desktop.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",

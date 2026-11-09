@@ -1,4 +1,5 @@
 /** Own composer-pill presence subscription and paging; teardown fences late directory replies and releases only this contribution. */
+import { nativePresenceRpc } from '../../shared/native/contracts';
 import { createBrowserPanelAutoOpen } from "./auto-open";
 import { createBrowserHeaderIcon } from "./browser-header";
 import type { PluginClientContext } from "@getpaseo/plugin/client";
@@ -95,8 +96,10 @@ export function contributeSharedBrowserClient(client: PluginClientContext) {
     try {
       const result = await client.rpc(listOpenBrowserWorkspacesRpc, {});
       if (stopped) return;
-      openWorkspaceIds = new Set(result.workspaceIds);
-      autoOpen.presence(result.workspaceIds);
+      const native = await client.rpc(nativePresenceRpc, {});
+      const workspaceIds = [...new Set([...result.workspaceIds,...native.workspaceIds,...native.requestedWorkspaceIds])];
+      openWorkspaceIds = new Set(workspaceIds);
+      autoOpen.presence(workspaceIds);
       syncAllPills();
     } catch {
       return;

@@ -2,6 +2,8 @@ import { expect, it, vi } from 'vitest';
 import type { PluginClientContext } from '@getpaseo/plugin/client';
 import contribute from '../../index.client';
 
+vi.mock('../native/desktop-service', () => ({ NativeDesktopService: class { dispose() {} } }));
+vi.mock('../native/panel', () => ({ NativeBrowserPanel: () => null }));
 vi.mock('./browser', () => ({ contributeSharedBrowserClient: vi.fn(() => vi.fn()), SharedBrowserPanel: () => null }));
 vi.mock('./sidebar', () => ({ contributeSharedBrowserSidebar: vi.fn(() => vi.fn()) }));
 vi.mock('../settings', () => ({ BrowserSettingsScreen: () => null }));
