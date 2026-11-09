@@ -10,6 +10,8 @@ Remote capture starts only when a viewer is watching. It publishes the latest fr
 
 Each workspace supports eight native tabs. Take and release control to pass the browser between a person and agents. Native agent tools wait for an in-flight command before a human takeover and reject commands whose lease changed. Dispatched mutations are never automatically retried. Mobile taps target the desktop viewport; the text controls send input to the focused page field.
 
+On desktop, take control and click **DevTools** to open Chromium's developer tools for the selected tab in a separate window, including Elements, Console, Network, Sources and Application.
+
 Native tabs use `persist:paseo-browser`, the same profile as Paseo's built-in browser. Cookies and logins are shared across native workspace tabs. This is independent of the legacy daemon Chrome profiles.
 
 ## Desktop bridge setup

@@ -173,6 +173,25 @@ export function NativeBrowserPanel({
         <Pressable onPress={() => void run("navigate", { url })}>
           <Text style={foreground}>Go</Text>
         </Pressable>
+        {desktop && (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Open Chrome DevTools"
+            accessibilityHint="Take control first, then inspect the selected browser tab"
+            disabled={!own || !state || !service}
+            style={{ opacity: own && state && service ? 1 : 0.5 }}
+            onPress={() => {
+              try {
+                setError(null);
+                service!.openDevTools(workspaceId);
+              } catch (error) {
+                setError(String(error));
+              }
+            }}
+          >
+            <Text style={foreground}>DevTools</Text>
+          </Pressable>
+        )}
       </View>
       {state?.tabs && (
         <ScrollView horizontal style={{ maxHeight: 38 }}>

@@ -453,6 +453,7 @@ interface NativeGuest {
   goBack(): void;
   goForward(): void;
   reload(): void;
+  openDevTools(options: { mode: "detach"; activate: boolean }): void;
   executeJavaScript(code: string): Promise<unknown>;
   capturePage(): Promise<{
     getSize(): { width: number; height: number };
@@ -465,6 +466,7 @@ interface NativeGuest {
   sendInputEvent(input: Record<string, unknown>): void;
 }
 export interface NativeGuestController {
+  openDevTools(): void;
   state(): import("../../shared/native/contracts").NativeState | null;
   capture(sequence: number): Promise<import("../../shared/native/contracts").NativeFrame | null>;
   execute(command: import("../../shared/native/contracts").NativeCommand): Promise<unknown>;
@@ -579,6 +581,10 @@ export function mountNativeGuest(
   };
   return {
     state,
+    openDevTools() {
+      if (!ready || disposed) throw Error("Native browser is not ready");
+      guest.openDevTools({ mode: "detach", activate: true });
+    },
     async capture(sequence) {
       if (!ready || disposed) return null;
       if (!api.captureNativeFrame)
