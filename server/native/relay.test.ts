@@ -155,3 +155,17 @@ it('uses host receipt time for remote desktop frames instead of assuming synchro
  relay.exchange({clientId:desktop,workspaceId:'workspace',state,frame,results:[]});
  expect(relay.watch('workspace',phone,0).frame).toEqual(frame);
 });
+
+it('does not renew frame freshness from desktop heartbeats or rejected frame replays', () => {
+  let now = 10_000;
+  const relay = fixture(() => now);
+  const frame = { sequence: 1, capturedAt: now, data: 'data:image/jpeg;base64,/9j/', width: 1280, height: 800, generation: 1, browserId: 'native-one' };
+  relay.exchange({ clientId: desktop, workspaceId: 'workspace', state, frame, results: [] });
+  now += 1600;
+  exchange(relay);
+  expect(relay.watch('workspace', phone, 0).frame).toBeNull();
+  relay.exchange({ clientId: desktop, workspaceId: 'workspace', state, frame, results: [] });
+  expect(relay.watch('workspace', phone, 0).frame).toBeNull();
+  relay.exchange({ clientId: desktop, workspaceId: 'workspace', state, frame: { ...frame, sequence: 2 }, results: [] });
+  expect(relay.watch('workspace', phone, 0).frame?.sequence).toBe(2);
+});

@@ -12,6 +12,7 @@ import { createPrivateVirtualDisplay } from '../server/workspace/virtual-display
 
 const binary = process.env.PASEO_ELECTRON_BINARY;
 assert.ok(binary, 'Set PASEO_ELECTRON_BINARY to an Electron executable');
+const mediaDirectory = resolve(process.env.PASEO_LISTING_OUTPUT_DIR ?? 'assets');
 const directory = await mkdtemp(join(tmpdir(), 'paseo-listing-media-'));
 const relay = new NativeRelay();
 await relay.listen();
@@ -39,9 +40,10 @@ const server = createServer(async (req, res) => {
     }
     res.setHeader('Content-Type', 'text/html');
     if (req.url === '/demo') {
-      res.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Browser workspace</title>
+      const html = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Browser workspace</title>
       <style>*{box-sizing:border-box}body{margin:0;background:#eff3f9;color:#142039;font:16px system-ui}main{max-width:920px;margin:48px auto;padding:0 28px}.tag{font-size:12px;letter-spacing:2px;color:#526581}h1{font-size:44px;letter-spacing:-2px;margin:12px 0}p{color:#526581;line-height:1.6}.cards{display:flex;gap:16px;margin:32px 0}.card{flex:1;background:white;border:1px solid #d9e1ee;border-radius:14px;padding:22px}h2{font-size:18px;margin:0 0 12px}button{background:#2858dd;color:white;border:0;border-radius:8px;padding:12px 18px;font:inherit}input{padding:12px;border:1px solid #b8c6dc;border-radius:8px;font:inherit;width:230px}output{display:block;margin-top:18px;color:#1a6b4e}@media(max-width:650px){h1{font-size:32px}.cards{display:block}.card{margin-bottom:12px}}</style>
-      <main><div class="tag">PASEO BROWSER · DEMO WORKSPACE</div><h1>Your browser, shared.</h1><p>A native Chromium tab on desktop. The same page on your phone.<br>Agents and people work with the same tabs and cookies.</p><div class="cards"><section class="card"><h2>Native on desktop</h2><p>Interact with the page directly and open Chromium DevTools.</p></section><section class="card"><h2>Visible on mobile</h2><p>Follow the desktop session and take control when you need it.</p></section></div><section class="card"><h2>Try the shared page</h2><p>Type a message and run an action in the same browser session.</p><input aria-label="Demo message" value="Hello from Paseo"><button onclick="document.querySelector('output').textContent=document.querySelector('input').value">Run action</button><output>Ready for people and agents.</output></section><p><small>Live demo · <span id="clock"></span></small></p></main><script>function tick(t){document.getElementById("clock").textContent=(t/1000).toFixed(1)+" s";requestAnimationFrame(tick)}requestAnimationFrame(tick)</script>`); return;
+      <main><div class="tag">PASEO BROWSER · DEMO WORKSPACE</div><h1>Your browser, shared.</h1><p>A native Chromium tab on desktop. The same page on your phone.<br>Agents and people work with the same tabs and cookies.</p><div class="cards"><section class="card"><h2>Native on desktop</h2><p>Interact with the page directly and open Chromium DevTools.</p></section><section class="card"><h2>Visible on mobile</h2><p>Follow the desktop session and take control when you need it.</p></section></div><section class="card"><h2>Try the shared page</h2><p>Type a message and run an action in the same browser session.</p><input aria-label="Demo message" value="Hello from Paseo"><button onclick="document.querySelector('output').textContent=document.querySelector('input').value">Run action</button><output>Ready for people and agents.</output></section><p><small>Live demo · <span id="clock"></span></small></p></main><script>function tick(t){document.getElementById("clock").textContent=(t/1000).toFixed(1)+" s";requestAnimationFrame(tick)}requestAnimationFrame(tick)</script>`;
+      res.end(process.env.PASEO_LISTING_STATIC === '1' ? html.replace(/<script>[\s\S]*?<\/script>/g, '') : html); return;
     }
     res.end('<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body,#root{margin:0;width:100%;height:100%;display:flex;flex-direction:column}</style><div id="root"></div><script src="/app.js"></script>');
   } catch (error) { res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: String(error) })); }
@@ -80,8 +82,8 @@ try {
   await page.click('text/Take control');
   await page.waitForSelector('[aria-label="Open Chrome DevTools"]:not([aria-disabled="true"])');
   await pause(1000);
-  await mkdir(resolve('assets'), { recursive: true });
-  await page.screenshot({ path: resolve('assets/native-desktop.png') });
+  await mkdir(mediaDirectory, { recursive: true });
+  await page.screenshot({ path: join(mediaDirectory, 'native-desktop.png') });
   await page.click('text/Release');
   mobile = await puppeteer.launch({ executablePath: process.env.PASEO_CHROME_BINARY ?? '/usr/bin/google-chrome', headless: true });
   const phone = await mobile.newPage(); await phone.setViewport({ width:390, height:844 });
@@ -89,7 +91,13 @@ try {
   try { await phone.waitForSelector('[aria-label="Live native browser"]', {timeout:15000}); } catch(error) { console.error(await phone.evaluate('document.body.innerText'), relay.watch('native-test','listing-debug',0), log); throw error; }
   await phone.waitForFunction('Array.from(document.images).some(image=>image.naturalWidth>0)');
   assert.equal(await phone.$('[aria-label="Open Chrome DevTools"]'), null);
-  await phone.screenshot({ path: resolve('assets/native-mobile.png') });
+  if (process.env.PASEO_LISTING_STATIC === '1') {
+    await pause(3000);
+    await phone.reload();
+    await phone.waitForSelector('[aria-label="Live native browser"]', {timeout:10000});
+    await phone.waitForFunction('Array.from(document.images).some(image=>image.naturalWidth>0)');
+  }
+  await phone.screenshot({ path: join(mediaDirectory, 'native-mobile.png') });
   console.log('Captured native desktop and same-session mobile screenshots.');
 } finally {
   await mobile?.close(); desktop?.disconnect(); child.kill('SIGTERM'); await relay.close();

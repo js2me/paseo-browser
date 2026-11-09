@@ -506,6 +506,8 @@ export function mountNativeGuest(
   let generation = 0;
   let size = { width: 1280, height: 800 };
   let lastCapture = 0;
+  let lastFrameReceivedAt = 0;
+  let lastStillAttemptAt = -Infinity;
   let changedAt = 0;
   const register = async () => {
     try {
@@ -590,10 +592,37 @@ export function mountNativeGuest(
       if (!api.captureNativeFrame)
         throw Error("Mobile broadcast requires the Paseo desktop native bridge update.");
       const before = generation;
-      const frame = await api.captureNativeFrame({ browserId, workspaceId, notBefore: changedAt });
-      if (!frame || disposed || before !== generation || frame.capturedAt <= lastCapture)
-        return null;
+      let frame = await api.captureNativeFrame({ browserId, workspaceId, notBefore: changedAt });
+      if (disposed || before !== generation) return null;
+      if (!frame || frame.capturedAt <= lastCapture) {
+        // Screencast emits paints, not a periodic video: a still page may never
+        // produce a frame newer than the navigation/resize freshness fence.
+        // Capture through main-process CDP; renderer capturePage is unsafe in Electron.
+        const now = Date.now();
+        if (now < changedAt || now - lastFrameReceivedAt < 1000 || now - lastStillAttemptAt < 1000)
+          return null;
+        lastStillAttemptAt = now;
+        const scale = Math.min(1, 1280 / size.width, 960 / size.height);
+        if (!Number.isFinite(scale) || scale <= 0) return null;
+        const result = await cdp("Page.captureScreenshot", {
+          format: "jpeg",
+          quality: 65,
+          fromSurface: true,
+          captureBeyondViewport: false,
+          clip: { x: 0, y: 0, width: size.width, height: size.height, scale },
+        }) as { data?: unknown };
+        if (disposed || before !== generation) return null;
+        if (typeof result.data !== "string" || !/^[A-Za-z0-9+/=]+$/.test(result.data) || result.data.length > 1_099_900)
+          throw Error("Native still frame is invalid or exceeds the image size limit");
+        frame = {
+          data: `data:image/jpeg;base64,${result.data}`,
+          width: Math.round(size.width * scale),
+          height: Math.round(size.height * scale),
+          capturedAt: Date.now(),
+        };
+      }
       lastCapture = frame.capturedAt;
+      lastFrameReceivedAt = Date.now();
       return { ...frame, sequence, generation, browserId };
     },
     async execute(command) {

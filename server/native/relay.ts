@@ -117,9 +117,10 @@ export class NativeRelay {
       input.frame.browserId === input.state.browserId &&
       input.frame.generation === input.state.generation &&
       input.frame.sequence > (workspace.frame?.sequence ?? 0)
-    )
+    ) {
       workspace.frame = input.frame;
-      workspace.frameReceivedAt=this.now();
+      workspace.frameReceivedAt = this.now();
+    }
     for (const result of input.results) {
       const pending = workspace.pending.get(result.id);
       if (!pending?.dispatched) continue;
