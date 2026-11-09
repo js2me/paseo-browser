@@ -145,6 +145,9 @@ export class NativeDesktopService {
       let sequence = 0;
       let streaming = false;
       let results: Array<{ id: string; result?: unknown; error?: string }> = [];
+      let captureTask: Promise<void> | null = null;
+      let capturedFrame: NativeFrame | null = null;
+      let captureError: string | null = null;
       const pump = async () => {
         try {
           const guest = owned.guest;
@@ -156,13 +159,8 @@ export class NativeDesktopService {
               url: tab.state()?.url ?? "about:blank",
               title: tab.state()?.title ?? "New tab",
             }));
-          let frame: NativeFrame | null = null;
-          let captureError: string | null = null;
-          try {
-            if (streaming && snapshot.state?.cdp) frame = await guest.capture(++sequence);
-          } catch (error) {
-            captureError = String(error).slice(0, 2048);
-          }
+          const frame = capturedFrame;
+          capturedFrame = null;
           if (owned.stopped) return;
           const completed = results;
           results = [];
@@ -197,6 +195,19 @@ export class NativeDesktopService {
               (result) => results.push({ id: command.id, result }),
               (error) => results.push({ id: command.id, error: String(error) }),
             );
+          // A capture can wait for a compositor paint (including on about:blank).
+          // It must never hold command dispatch or the desktop ownership heartbeat.
+          if (streaming && snapshot.state?.cdp && !captureTask) {
+            const source = owned.guest;
+            captureTask = source.capture(++sequence).then(
+              (frame) => {
+                if (owned.stopped || owned.guest !== source) return;
+                capturedFrame = frame;
+                captureError = null;
+              },
+              (error) => { captureError = String(error).slice(0, 2048); },
+            ).finally(() => { captureTask = null; });
+          }
         } catch (error) {
           if (!owned.stopped) {
             snapshot.error = String(error);

@@ -63,3 +63,25 @@ it("starts and parks a remotely requested workspace without mounting a panel", a
   await vi.advanceTimersByTimeAsync(3000);
   expect(rpc).toHaveBeenCalledTimes(calls);
 });
+
+it("keeps commands and heartbeats running while a capture never settles", async () => {
+  vi.useFakeTimers();
+  let commands: any[] = [];
+  const rpc = vi.fn(async () => {
+    const next = commands; commands = [];
+    return { accepted: true, controller: null, streaming: true, commands: next };
+  });
+  const service = new NativeDesktopService({ rpc: rpc as any });
+  service.attach("workspace", {}, "about:blank", () => {});
+  const guest = guests[0];
+  guest.state = () => ({ browserId: "guest-0", cdp: true });
+  guest.capture = vi.fn(() => new Promise(() => {}));
+  guest.execute = vi.fn().mockResolvedValue({ opened: true });
+  await vi.advanceTimersByTimeAsync(150);
+  commands = [{ id: "open", operation: "navigate", input: {url:"https://example.com"} }];
+  await vi.advanceTimersByTimeAsync(6000);
+  expect(guest.execute).toHaveBeenCalledWith(expect.objectContaining({ id: "open" }));
+  expect(rpc.mock.calls.length).toBeGreaterThan(20);
+  expect(guest.capture).toHaveBeenCalledTimes(1);
+  service.dispose();
+});

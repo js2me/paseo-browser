@@ -42,7 +42,7 @@ On Linux, prepare a separate copy of your existing desktop AppDir:
 npm run prepare:native-desktop -- --source /path/to/Paseo-AppDir --destination /new/path/paseo-native
 ```
 
-This copies the application, updates its ASAR browser bridge, preserves native dependencies and leaves the running app and daemon untouched. The destination must not already exist. Close the original desktop before launching `/new/path/paseo-native/run-native-paseo`. Use the normal sandbox flags for your installation. Do not restart a desktop-managed daemon while agents are running without arranging that interruption.
+This copies the application, updates its ASAR browser bridge, preserves native dependencies and leaves the running app and daemon untouched. The destination must not already exist. Close the original desktop before launching `/new/path/paseo-native/run-native-paseo`. The generated Linux launcher defaults to X11/XWayland when `DISPLAY` is available, because hidden WebViews can stall capture on Wayland in Electron 37. GPU acceleration remains enabled. Use `PASEO_ELECTRON_FLAGS` to explicitly select a different backend, and use the normal sandbox flags for your installation. Do not restart a desktop-managed daemon while agents are running without arranging that interruption.
 
 For a source build, apply `integrations/paseo/native-bridge.patch` to the documented Paseo revision and build its desktop package. See [bridge details](integrations/paseo/README.md).
 

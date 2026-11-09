@@ -1,6 +1,6 @@
 {
   "name": "paseo-browser",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "Shared native Chromium for Paseo agents, desktop DevTools and mobile viewing",
   "type": "module",
   "license": "MIT",

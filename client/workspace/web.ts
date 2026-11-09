@@ -510,6 +510,8 @@ export function mountNativeGuest(
   let lastCapture = 0;
   let lastFrameReceivedAt = 0;
   let lastStillAttemptAt = -Infinity;
+  let streamRead: Promise<void> | null = null;
+  let streamFrame: { data: string; width: number; height: number; capturedAt: number } | null = null;
   let changedAt = 0;
   const register = async () => {
     try {
@@ -541,7 +543,7 @@ export function mountNativeGuest(
       top: visible ? `${bounds!.top}px` : "0px",
       width: `${lastBounds.width}px`,
       height: `${lastBounds.height}px`,
-      zIndex: visible?"1":"-1",
+      zIndex: visible ? "1" : "-1",
       clipPath: "none",
       pointerEvents: visible && inputEnabled ? "auto" : "none",
     });
@@ -594,9 +596,16 @@ export function mountNativeGuest(
       if (!api.captureNativeFrame)
         throw Error("Mobile broadcast requires the Paseo desktop native bridge update.");
       const before = generation;
-      let frame = await api.captureNativeFrame({ browserId, workspaceId, notBefore: changedAt });
+      if (!streamRead) {
+        streamRead = api.captureNativeFrame({ browserId, workspaceId, notBefore: changedAt }).then(
+          (frame) => { if (!disposed && before === generation) streamFrame = frame; },
+          () => { /* The bounded still capture below can recover from a stalled stream. */ },
+        ).finally(() => { streamRead = null; });
+        await Promise.resolve();
+      }
+      let frame = streamFrame;
       if (disposed || before !== generation) return null;
-      if (!frame || frame.capturedAt <= lastCapture) {
+      if (!frame || frame.capturedAt <= lastCapture || frame.capturedAt <= changedAt) {
         // Screencast emits paints, not a periodic video: a still page may never
         // produce a frame newer than the navigation/resize freshness fence.
         // Capture through main-process CDP; renderer capturePage is unsafe in Electron.

@@ -60,3 +60,13 @@ it("drops screenshots taken across navigation and rejects oversized images", asy
   sendNativeCommand.mockResolvedValue({ data: "A".repeat(1_100_000) });
   await expect(controller.capture(2)).rejects.toThrow("size limit");
 });
+
+it("falls back to a still while screencast startup is pending, without multiplying stream requests", async () => {
+  const { controller, captureNativeFrame, sendNativeCommand } = await fixture();
+  captureNativeFrame.mockImplementation(() => new Promise(() => {}));
+  expect(await controller.capture(1)).toMatchObject({ sequence: 1 });
+  vi.setSystemTime(11_200);
+  expect(await controller.capture(2)).toMatchObject({ sequence: 2 });
+  expect(captureNativeFrame).toHaveBeenCalledTimes(1);
+  expect(sendNativeCommand).toHaveBeenCalledTimes(2);
+});

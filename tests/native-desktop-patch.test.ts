@@ -93,3 +93,16 @@ printf 'native launcher fixture'
   assert.deepEqual(await readFile(join(source,'resources/app.asar')),archive);
  }finally{await rm(directory,{recursive:true,force:true});}
 });
+
+
+test('native launcher selects XWayland for capture and preserves an explicit backend', async () => {
+ const {nativeDesktopLauncher}=await import(pathToFileURL(resolve('server/native/patch-desktop.mjs')).href);
+ const directory=await mkdtemp(join(tmpdir(),'paseo-launch-backend-'));
+ try {
+  const launcher=join(directory,'launch');await writeFile(launcher,nativeDesktopLauncher(),{mode:0o755});
+  await writeFile(join(directory,'AppRun'),'#!/bin/sh\nprintf "%s\\n" "$PASEO_ELECTRON_FLAGS" "$@"\n',{mode:0o755});
+  const run=promisify(execFile);const env={...process.env,DISPLAY:':99',PASEO_ELECTRON_FLAGS:''};
+  assert.equal((await run(launcher,['--no-sandbox'],{env})).stdout,'--ozone-platform=x11\n--no-sandbox\n');
+  assert.equal((await run(launcher,['--no-sandbox'],{env:{...env,PASEO_ELECTRON_FLAGS:'--ozone-platform=wayland'}})).stdout,'--ozone-platform=wayland\n--no-sandbox\n');
+ } finally {await rm(directory,{recursive:true,force:true});}
+});

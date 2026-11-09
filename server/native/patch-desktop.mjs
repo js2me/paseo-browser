@@ -108,6 +108,26 @@ export function readDesktopEntry(archive, path) {
     .toString();
 }
 
+/** Wayland can leave hidden Electron guests without a captureable compositor surface. */
+export function nativeDesktopLauncher() {
+  return [
+    '#!/bin/sh',
+    'cd "$(dirname "$0")"',
+    'APPDIR="$(pwd)"',
+    'export APPDIR',
+    'unset APPIMAGE',
+    'if [ -n "${DISPLAY:-}" ]; then',
+    '  case " ${PASEO_ELECTRON_FLAGS:-} " in',
+    '    *--ozone-platform=*) ;;',
+    '    *) PASEO_ELECTRON_FLAGS="${PASEO_ELECTRON_FLAGS:+$PASEO_ELECTRON_FLAGS }--ozone-platform=x11" ;;',
+    '  esac',
+    '  export PASEO_ELECTRON_FLAGS',
+    'fi',
+    'exec ./AppRun "$@"',
+    '',
+  ].join("\n");
+}
+
 export async function prepareNativeDesktop(source, destination) {
   source = resolve(source);
   destination = resolve(destination);
@@ -141,7 +161,7 @@ export async function prepareNativeDesktop(source, destination) {
   await access(executable);
   await writeFile(
     join(destination, "run-native-paseo"),
-    `#!/bin/sh\ncd "$(dirname "$0")"\nAPPDIR="$(pwd)"\nexport APPDIR\nunset APPIMAGE\nexec ./AppRun "$@"\n`,
+    nativeDesktopLauncher(),
     { mode: 0o755 },
   );
   return join(destination, "run-native-paseo");
