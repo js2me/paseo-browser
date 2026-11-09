@@ -1,7 +1,7 @@
 {
   "name": "paseo-browser",
-  "version": "0.4.0",
-  "description": "Chrome browser tools for Paseo agents",
+  "version": "0.4.1",
+  "description": "Shared native Chromium for Paseo agents, desktop DevTools and mobile viewing",
   "type": "module",
   "license": "MIT",
   "files": [
@@ -20,11 +20,13 @@
     "!**/*.test.ts",
     "!**/*.test.tsx",
     "agent-skills",
-    "integrations"
+    "integrations",
+    "LICENSE",
+    "assets"
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/*.test.ts && vitest run client/workspace server/workspace server/native shared/workspace",
+    "test": "tsx --test tests/*.test.ts && vitest run client/native client/workspace server/workspace server/native shared/workspace",
     "test:chrome": "tsx tests/chrome-smoke.ts",
     "postinstall": "node server/prepare.mjs && node server/workspace/prepare-runtime.mjs",
     "test:workspace": "vitest run client/workspace server/workspace shared/workspace",
@@ -60,5 +62,24 @@
   },
   "engines": {
     "node": ">=24"
-  }
+  },
+  "author": "Sergey Volkov <js2me@outlook.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/js2me/paseo-browser.git"
+  },
+  "homepage": "https://github.com/js2me/paseo-browser#readme",
+  "bugs": {
+    "url": "https://github.com/js2me/paseo-browser/issues"
+  },
+  "keywords": [
+    "paseo",
+    "paseo-plugin",
+    "browser",
+    "chrome",
+    "chromium",
+    "mcp",
+    "devtools",
+    "browser-automation"
+  ]
 }

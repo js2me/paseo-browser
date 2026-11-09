@@ -1,6 +1,6 @@
 {
   "id": "paseo-browser",
-  "name": "Chrome browser",
+  "name": "Paseo Browser",
   "requirements": {
     "paseo": ">=0.15.0"
   },
@@ -24,5 +24,9 @@
       "server/install-agent-skill.mjs"
     ]
   ],
-  "description": "Shared Chrome workspace panel, human/agent control and Chrome DevTools tools"
+  "description": "Shared native Chromium for Paseo agents, desktop DevTools and mobile viewing",
+  "media": [
+    "assets/native-desktop.png",
+    "assets/native-mobile.png"
+  ]
 }

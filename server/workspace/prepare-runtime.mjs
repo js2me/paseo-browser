@@ -120,11 +120,7 @@ async function findLinuxArm64Chromium() {
   try {
     return await requireExecutable(candidate, "System Chromium executable");
   } catch {
-    throw new Error(
-      `Linux ARM64 requires native Chromium at ${candidate}. ` +
-        "Install a non-Snap Chromium build or set " +
-        "PASEO_BROWSER_WORKSPACE_CHROMIUM_EXECUTABLE to its absolute path.",
-    );
+    return null;
   }
 }
 
@@ -172,6 +168,23 @@ async function installChromium() {
     console.log(`Using system Chromium at ${systemChromium}`);
     return executable;
   }
+
+  // Native mode uses Electron's Chromium and needs no separate browser download.
+  // An interactive user's explicit CLI flag is required for the optional legacy browser.
+  if (!process.argv.includes("--download-chromium")) {
+    console.log(
+      "No installed Chrome found. Native mode is ready without a browser download. " +
+        "For legacy workspace mode, install Chrome yourself or explicitly run " +
+        "npm run prepare:workspace -- --download-chromium to download Chrome for Testing via agent-browser.",
+    );
+    return null;
+  }
+  if (hostPlatform === "linux" && hostArch === "arm64")
+    throw new Error(
+      "Linux ARM64 requires a non-Snap system Chromium. Set " +
+        "PASEO_BROWSER_WORKSPACE_CHROMIUM_EXECUTABLE to its absolute path.",
+    );
+  console.log("Downloading Chrome for Testing via agent-browser as explicitly requested.");
 
   // Rust's dirs::home_dir() ignores HOME on Windows and resolves the profile
   // through SHGetKnownFolderPath. Use that cache there; Unix stays isolated.
@@ -255,7 +268,7 @@ await writeFile(
   { mode: 0o600 },
 );
 await applyPrivatePermissions(stagingRoot);
-if (hostPlatform !== "win32") {
+if (chromiumEntry && hostPlatform !== "win32") {
   await validateChromium(await requireExecutable(chromiumEntry, "Staged Chromium executable"));
 }
 await replaceRuntime(stagingRoot, runtimeRoot);

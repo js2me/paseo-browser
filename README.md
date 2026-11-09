@@ -2,6 +2,24 @@
 
 Native Chromium in Paseo Desktop, with a live mobile broadcast of the same browser session. Agents and people use the same tabs, cookies and page state.
 
+![Native desktop browser with DevTools control](assets/native-desktop.png)
+
+## Install
+
+Install from the public GitHub repository on your Paseo daemon:
+
+```sh
+paseo plugin add git:js2me/paseo-browser
+```
+
+Requires **Paseo 0.15.0+**, **Node.js 24+** and plugins enabled on the target daemon.
+The plugin has not yet been approved for the official catalog. [Paseo Cafe](https://paseo.cafe)
+uses that catalog; direct Git installation works independently of a listing.
+
+**Native mobile sharing and full CDP need the included custom desktop bridge.** Installing
+this plugin alone does not add the bridge to a standard Paseo desktop. Native rendering and
+the desktop DevTools button use the existing WebView API. See [bridge setup](#desktop-bridge-setup).
+
 ## Native desktop and mobile
 
 The default `hybrid` mode embeds an actual Electron WebView in the workspace panel. Desktop rendering, keyboard, mouse and scrolling run in Chromium. Mobile and browser clients receive MJPEG frames from that exact guest through authenticated Paseo plugin RPCs. The desktop remains the browser host; websites and `localhost` URLs run on that desktop.
@@ -28,15 +46,20 @@ This copies the application, updates its ASAR browser bridge, preserves native d
 
 For a source build, apply `integrations/paseo/native-bridge.patch` to the documented Paseo revision and build its desktop package. See [bridge details](integrations/paseo/README.md).
 
-Install the plugin on the daemon:
-
-```sh
-npm install
-npm run typecheck
-paseo plugin install /absolute/path/to/paseo-browser
-```
-
 Open **Open Workspace Browser** in the Command Center or the browser composer/header button. Agent browser requests reveal the panel in the displayed workspace. The phone shows the native desktop's broadcast. A workspace whose desktop browser is not available reports that condition instead of opening an independent Chrome.
+
+<details>
+<summary>Mobile view of the same desktop session</summary>
+
+![Same-session mobile broadcast in a compact web client](assets/native-mobile.png)
+
+</details>
+
+Screenshots use sample data in an isolated Electron integration host and a phone-sized web client.
+Linux native behavior has been tested; physical iOS/Android devices and macOS/Windows native builds
+have not been verified. The source patch baseline is Paseo 0.15.3 at the revision in
+[`integrations/paseo/base.json`](integrations/paseo/base.json); the Linux AppDir overlay was also
+verified against Paseo 0.15.0. Other desktop revisions may require adapting the patch.
 
 ## Agent tools
 
@@ -50,7 +73,7 @@ Native mode injects the `paseo-browser` MCP adapter:
 
 Acquire control before actions and release afterward. `native_browser_automation` takes `{ name, args }`; use element refs from its current `snapshot`. Native browser IDs come from `shared_browser_tabs`. Browser-level commands cannot close or crash Paseo; manage native tabs through the dedicated tab tools. Cookie and protocol rules are enforced by Chromium. Native CDP is scoped to the registered guest and its owning window/workspace. Uploads use the desktop's filesystem and Paseo's workspace path checks.
 
-The managed skill under `agent-skills/paseo-browser` is installed into the local agent skill directories. Existing agent sessions need reloading to discover the native adapter. Unrelated MCP servers and user prompts are preserved.
+Installation writes runtime adapters under `$PASEO_HOME/plugin-data/paseo-browser/`. The managed skill under `agent-skills/paseo-browser` is installed into the local agent skill directories. Existing agent sessions need reloading to discover the native adapter. Unrelated MCP servers and user prompts are preserved.
 
 ## Other connection modes
 
@@ -64,7 +87,45 @@ The managed skill under `agent-skills/paseo-browser` is installed into the local
 
 Legacy workspace cookies and localStorage remain under `$PASEO_HOME/plugin-data/paseo-browser/profiles/`. Chrome MCP usage statistics and CrUX reporting are disabled. Legacy code and its MIT attribution remain in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
 
-## Validation
+## Optional legacy browser setup
+
+Normal preparation reuses installed Chrome and **does not download a browser**. Native mode
+uses Electron's included Chromium. If Chrome is absent, native adapters still prepare successfully.
+For legacy `workspace` mode, install Chrome yourself and rerun preparation, or set
+`PASEO_BROWSER_WORKSPACE_CHROMIUM_EXECUTABLE` to its absolute path before installing the plugin.
+Linux ARM64 requires a native, non-Snap Chromium installation.
+
+To explicitly request the optional Chrome for Testing download, run this from the plugin checkout:
+
+```sh
+npm run prepare:workspace -- --download-chromium
+```
+
+This invokes the locked agent-browser installer, which obtains Chrome for Testing from Google's
+distribution. It uses the daemon host's network and disk. Declining this optional step leaves the
+browser uninstalled. The flag is not present in the automatic installation commands.
+
+## Data and permissions
+
+This is a trusted local plugin with browser and filesystem access. Native pages and uploads run
+on the desktop; legacy workspace pages run on the daemon. Websites receive normal browser requests
+and cookies. Information requested by an agent, including page text, screenshots, cookies and
+network/console output, can be sent to its configured model provider. Native logins are shared
+across Paseo browser workspaces. See [the listing overview](OVERVIEW.md) for storage and access details.
+
+## Development and validation
+
+```sh
+npm ci --ignore-scripts
+node server/prepare.mjs
+npm run typecheck
+```
+
+For runtime preparation in development, point `PASEO_HOME` at a dedicated test directory before
+running `npm run prepare:workspace`. Install a local checkout with
+`paseo plugin install /absolute/path/to/paseo-browser` and reload it after edits.
+
+Run checks appropriate to your change:
 
 ```sh
 npm run typecheck
@@ -76,4 +137,25 @@ PASEO_ELECTRON_BINARY=/path/to/electron npm run test:native
 
 The native integration test uses a separate Electron process and profile, real WebViews and CDP, a real MCP adapter, and a phone-sized Chrome client. It checks native snapshots/screenshots/tabs, HttpOnly cookies, mobile touch, lease fencing, and fresh frames while the desktop pane is parked. Set `PASEO_CHECKOUT` to the Paseo source checkout containing the bridge patch; it defaults to `../paseo`. This validates a compact web client, not physical iOS/Android hardware.
 
-`test:shared` and `test:ui` cover the retained legacy browser mode. Generated runtimes, local machine paths, node_modules and screenshots are excluded from the package or Git as appropriate.
+`test:shared` and `test:ui` cover the retained legacy browser mode. Generated runtimes, local machine paths, node_modules and test artifacts are excluded from the
+package or Git. The listing screenshots in `assets/` are intentionally shipped.
+
+Regenerate listing media using an installed Electron executable:
+
+```sh
+PASEO_ELECTRON_BINARY=/path/to/electron npx tsx tests/listing-media.ts
+```
+
+This uses a private Xvfb display, temporary profiles and the real plugin panel and capture bridge.
+It requires Linux, Xvfb and Chrome (or `PASEO_CHROME_BINARY`).
+
+## Publication and contributions
+
+[Registry submission details](.github/REGISTRY_SUBMISSION.md) include the source, screenshots and
+bridge requirements. Registry approval is separate from pushing code to GitHub.
+Report bugs through [GitHub Issues](https://github.com/js2me/paseo-browser/issues); include the Paseo
+versions, operating system, browser mode and reproduction steps. Remove cookies, tokens and
+personal page content from logs and screenshots.
+
+Licensed under [MIT](LICENSE). Shared Browser attribution is in
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md); the desktop integration retains Paseo's licenses.
