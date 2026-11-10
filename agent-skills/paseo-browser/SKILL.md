@@ -15,7 +15,7 @@ When `native_browser_open` is available, use native mode (the default):
 
 1. Call `native_browser_open` with the site's HTTP(S) URL. This opens the real desktop WebView; a mobile viewer sees that exact guest. Keep Paseo Desktop connected. Its panel may be parked while the phone is watching.
 2. Acquire `shared_browser_acquire_control`, then use `native_browser_automation` with `{ name: "snapshot", args: {} }` to obtain native element refs. Use the same tool for click/fill/type/keyboard, wait, upload, screenshot, hover/drag, logs, scroll and resize.
-3. Use `evaluate_script` for JavaScript, `browser_cookies` for cookies, and `cdp_send`/`cdp_events` for the registered guest's protocol. Full CDP and mobile sharing require the desktop bridge update. Report that specific missing capability if needed.
+3. Use `evaluate_script` for JavaScript, `browser_cookies` for cookies, and `cdp_send`/`cdp_events` for the registered guest's protocol. Mobile viewing works with standard desktop screenshots. Full CDP and cookie management require the optional desktop bridge; report that specific missing capability if needed. Keep the desktop native.
 4. Use `shared_browser_tabs`, `shared_browser_tab_open`, `shared_browser_tab_select` and `shared_browser_tab_close` for native tabs. Native profile cookies are shared with Paseo's other native tabs.
 5. Release control after the action. Never force control from a person. Dispatched mutations are not automatically retried.
 

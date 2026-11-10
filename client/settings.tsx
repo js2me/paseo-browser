@@ -39,7 +39,7 @@ export function BrowserSettingsScreen({ theme }: PluginSurfaceProps) {
       {values.mode === 'isolated' && <SettingsSwitch label="Headless" value={values.headless} onValueChange={(headless) => update({ headless })} />}
     </SettingsCard></SettingsSection>
     {values.mode === 'isolated' && field('Chrome executable (empty = automatic)', values.executablePath, (executablePath) => update({ executablePath }))}
-    {values.mode === 'hybrid' && <Text style={foreground}>Desktop renders a native Chromium WebView. Mobile receives a live broadcast of that exact guest. Keep the desktop panel open. Full CDP/cookie tools require the desktop bridge patch shipped with this plugin.</Text>}
+    {values.mode === 'hybrid' && <Text style={foreground}>Desktop renders native Chromium. Mobile views the same tab while Paseo Desktop is connected, even with its panel closed. The optional desktop bridge adds faster capture and full CDP/cookie tools.</Text>}
     {values.mode === 'workspace' && <Text style={foreground}>One browser per workspace, visible in the Workspace Browser panel on desktop and mobile. Logins persist. Take and release control to hand the browser between humans and agents.</Text>}
     {values.mode === 'endpoint' && field('Chrome debugging URL', values.browserUrl, (browserUrl) => update({ browserUrl }))}
     {values.mode === 'autoConnect' && <Text style={foreground}>Enable remote debugging at chrome://inspect/#remote-debugging in Chrome 144 or newer, then approve Chrome’s connection prompt. Agents can access your existing tabs and signed-in sites.</Text>}

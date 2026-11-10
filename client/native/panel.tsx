@@ -132,9 +132,7 @@ export function NativeBrowserPanel({
         }
         setError(
           reply.connected
-            ? reply.state && !reply.state.cdp
-              ? "Update Paseo desktop to enable mobile sharing and DevTools."
-              : reply.error
+            ? reply.error
             : "Waiting for a connected Paseo Desktop to start this workspace browser.",
         );
       } catch (error) {
@@ -341,7 +339,7 @@ export function NativeBrowserPanel({
           ? "Native Chromium"
           : `Live desktop broadcast${layout.compact ? "" : " · same browser session"}`}{" "}
         · {state?.title || state?.url || "No page"}
-        {desktop && state && !state.cdp ? " · CDP bridge update required" : ""}
+        {desktop && state && !state.cdp ? " · Full CDP requires the desktop bridge" : ""}
       </Text>
     </View>
   );

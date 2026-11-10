@@ -197,7 +197,7 @@ export class NativeDesktopService {
             );
           // A capture can wait for a compositor paint (including on about:blank).
           // It must never hold command dispatch or the desktop ownership heartbeat.
-          if (streaming && snapshot.state?.cdp && !captureTask) {
+          if (streaming && snapshot.state && !captureTask) {
             const source = owned.guest;
             captureTask = source.capture(++sequence).then(
               (frame) => {

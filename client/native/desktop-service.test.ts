@@ -8,6 +8,7 @@ vi.mock("../workspace/web", () => ({
     const guest = {
       state: () => ({ browserId: `guest-${guests.indexOf(guest)}`, url: "about:blank" }),
       inputEnabled: vi.fn(), present: vi.fn(), dispose: vi.fn(), openDevTools: vi.fn(),
+      capture: vi.fn().mockResolvedValue(null),
     };
     guests.push(guest);
     return guest;
@@ -64,7 +65,7 @@ it("starts and parks a remotely requested workspace without mounting a panel", a
   expect(rpc).toHaveBeenCalledTimes(calls);
 });
 
-it("keeps commands and heartbeats running while a capture never settles", async () => {
+it.each([true, false])("keeps commands and heartbeats running while capture stalls (CDP: %s)", async (cdp) => {
   vi.useFakeTimers();
   let commands: any[] = [];
   const rpc = vi.fn(async () => {
@@ -74,7 +75,7 @@ it("keeps commands and heartbeats running while a capture never settles", async 
   const service = new NativeDesktopService({ rpc: rpc as any });
   service.attach("workspace", {}, "about:blank", () => {});
   const guest = guests[0];
-  guest.state = () => ({ browserId: "guest-0", cdp: true });
+  guest.state = () => ({ browserId: "guest-0", cdp });
   guest.capture = vi.fn(() => new Promise(() => {}));
   guest.execute = vi.fn().mockResolvedValue({ opened: true });
   await vi.advanceTimersByTimeAsync(150);

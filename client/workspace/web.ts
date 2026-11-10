@@ -464,6 +464,57 @@ interface NativeGuest {
     };
   }>;
   sendInputEvent(input: Record<string, unknown>): void;
+  insertText(text: string): Promise<void>;
+  focus(): void;
+}
+
+/** Encode a stock desktop's main-process screenshot for remote viewers only. */
+async function encodeNativeScreenshot(document: unknown, browserId: string, value: unknown) {
+  const image = value as {
+    browserId?: string; mimeType?: string; dataBase64?: string; width?: number; height?: number;
+  } | null;
+  if (!image || image.browserId !== browserId || image.mimeType !== "image/png" ||
+    typeof image.dataBase64 !== "string" || image.dataBase64.length > 32_000_000 ||
+    !/^[A-Za-z0-9+/=]+$/.test(image.dataBase64))
+    throw Error("Desktop returned an invalid browser screenshot");
+  type ScreenshotImage = {
+    src: string; naturalWidth: number; naturalHeight: number; decode(): Promise<void>;
+  };
+  type ScreenshotCanvas = {
+    width: number; height: number;
+    getContext(kind: "2d"): {
+      fillStyle: string;
+      fillRect(x: number, y: number, width: number, height: number): void;
+      drawImage(image: ScreenshotImage, x: number, y: number, width: number, height: number): void;
+    } | null;
+    toDataURL(type: string, quality: number): string;
+  };
+  const captureDocument = document as {
+    createElement(kind: "canvas"): ScreenshotCanvas;
+    defaultView?: { Image?: new () => ScreenshotImage };
+  };
+  const Image = captureDocument.defaultView?.Image ??
+    (globalThis as unknown as { Image: new () => ScreenshotImage }).Image;
+  const decoded = new Image();
+  decoded.src = `data:image/png;base64,${image.dataBase64}`;
+  await decoded.decode();
+  const { naturalWidth: sourceWidth, naturalHeight: sourceHeight } = decoded;
+  if (!Number.isFinite(sourceWidth) || !Number.isFinite(sourceHeight) ||
+    sourceWidth <= 0 || sourceHeight <= 0 || sourceWidth * sourceHeight > 64_000_000)
+    throw Error("Desktop screenshot dimensions are invalid");
+  const scale = Math.min(1, 1280 / sourceWidth, 960 / sourceHeight);
+  const canvas = captureDocument.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(sourceWidth * scale));
+  canvas.height = Math.max(1, Math.round(sourceHeight * scale));
+  const context = canvas.getContext("2d");
+  if (!context) throw Error("Desktop screenshot encoder is unavailable");
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(decoded, 0, 0, canvas.width, canvas.height);
+  const data = canvas.toDataURL("image/jpeg", 0.65);
+  if (data.length > 1_100_000 || !/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(data))
+    throw Error("Desktop screenshot exceeds the mobile frame size limit");
+  return { data, width: canvas.width, height: canvas.height, capturedAt: Date.now() };
 }
 export interface NativeGuestController {
   openDevTools(): void;
@@ -510,6 +561,7 @@ export function mountNativeGuest(
   let lastCapture = 0;
   let lastFrameReceivedAt = 0;
   let lastStillAttemptAt = -Infinity;
+  let lastDesktopScreenshotAt = -Infinity;
   let streamRead: Promise<void> | null = null;
   let streamFrame: { data: string; width: number; height: number; capturedAt: number } | null = null;
   let changedAt = 0;
@@ -593,9 +645,25 @@ export function mountNativeGuest(
     },
     async capture(sequence) {
       if (!ready || disposed) return null;
-      if (!api.captureNativeFrame)
-        throw Error("Mobile broadcast requires the Paseo desktop native bridge update.");
       const before = generation;
+      if (!api.captureNativeFrame || !api.sendNativeCommand) {
+        // Stock Paseo already captures its native guest in the main process. This
+        // lower-rate path never replaces the desktop WebView with a stream.
+        const now = Date.now();
+        if (now < changedAt || now - lastDesktopScreenshotAt < 200) return null;
+        lastDesktopScreenshotAt = now;
+        const reply = await api.executeAutomationCommand({
+          type: "browser.automation.execute.request",
+          requestId: `native-broadcast-${browserId}-${sequence}`,
+          workspaceId,
+          command: { command: "screenshot", args: { browserId, fullPage: false } },
+        });
+        if (disposed || before !== generation) return null;
+        if (!reply.ok) throw Error(reply.error?.message ?? "Desktop screenshot failed");
+        const frame = await encodeNativeScreenshot(document, browserId, reply.result);
+        if (disposed || before !== generation) return null;
+        return { ...frame, sequence, generation, browserId };
+      }
       if (!streamRead) {
         streamRead = api.captureNativeFrame({ browserId, workspaceId, notBefore: changedAt }).then(
           (frame) => { if (!disposed && before === generation) streamFrame = frame; },
@@ -669,6 +737,10 @@ export function mountNativeGuest(
         if (input.kind === "type") {
           if (typeof input.text !== "string" || input.text.length > 4000)
             throw Error("Invalid browser text");
+          if (!api.sendNativeCommand) {
+            guest.focus();
+            return guest.insertText(input.text);
+          }
           return cdp("Input.insertText", { text: input.text });
         }
         if (input.kind === "key") {
@@ -680,6 +752,12 @@ export function mountNativeGuest(
           )
             throw Error("Unsupported key");
           const code = { Enter: 13, Tab: 9, Backspace: 8, Escape: 27 }[input.key];
+          if (!api.sendNativeCommand) {
+            guest.focus();
+            guest.sendInputEvent({ type: "keyDown", keyCode: input.key });
+            guest.sendInputEvent({ type: "keyUp", keyCode: input.key });
+            return {};
+          }
           await cdp("Input.dispatchKeyEvent", {
             type: "keyDown",
             key: input.key,
@@ -704,6 +782,12 @@ export function mountNativeGuest(
           y > size.height
         )
           throw Error("Invalid input coordinates");
+        if (!api.sendNativeCommand) {
+          guest.focus();
+          guest.sendInputEvent({ type: "mouseDown", x, y, button: "left", clickCount: 1 });
+          guest.sendInputEvent({ type: "mouseUp", x, y, button: "left", clickCount: 1 });
+          return {};
+        }
         await cdp("Input.dispatchMouseEvent", {
           type: "mousePressed",
           x,

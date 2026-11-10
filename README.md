@@ -6,25 +6,26 @@ Native Chromium in Paseo Desktop, with a live mobile broadcast of the same brows
 
 ## Install
 
-Install from the public GitHub repository on your Paseo daemon:
+Install from the official catalog on your Paseo daemon:
 
 ```sh
-paseo plugin add git:js2me/paseo-browser
+paseo plugin add js2me/browser
 ```
 
 Requires **Paseo 0.15.0+**, **Node.js 24+** and plugins enabled on the target daemon.
-The plugin has not yet been approved for the official catalog. [Paseo Cafe](https://paseo.cafe)
-uses that catalog; direct Git installation works independently of a listing.
+The catalog installs its reviewed commit. Direct Git installation with
+`paseo plugin add git:js2me/paseo-browser` follows the repository separately.
 
-**Native mobile sharing and full CDP need the included custom desktop bridge.** Installing
-this plugin alone does not add the bridge to a standard Paseo desktop. Native rendering and
-the desktop DevTools button use the existing WebView API. See [bridge setup](#desktop-bridge-setup).
+**Native rendering, desktop DevTools and mobile viewing work with standard Paseo Desktop.**
+Mobile viewing uses its built-in screenshot API when the optional bridge is absent.
+The included bridge adds faster capture and full CDP, including HttpOnly cookie management.
+See [bridge setup](#desktop-bridge-setup).
 
 ## Native desktop and mobile
 
 The default `hybrid` mode embeds an actual Electron WebView in the workspace panel. Desktop rendering, keyboard, mouse and scrolling run in Chromium. Mobile and browser clients receive MJPEG frames from that exact guest through authenticated Paseo plugin RPCs. The desktop remains the browser host; websites and `localhost` URLs run on that desktop.
 
-The mobile viewer retains its last decoded frame while the next JPEG loads, with Android image fading disabled. Remote capture starts only when a viewer is watching. It publishes the latest frame with no playback backlog, bounds frames to 1280 × 960 at JPEG quality 65, and requests approximately 15 updates per second. Static pages use a bounded CDP still capture when Chromium emits no fresh screencast frame, at most once per second while viewers watch. Closing the desktop panel parks its native guests without destroying them, so mobile viewing can continue. The desktop application must remain connected. Requests from an agent or mobile viewer start the native browser even when that workspace panel has never been opened on desktop. iOS and Android use their native image component for the JPEG stream.
+The mobile viewer retains its last decoded frame while the next JPEG loads, with Android image fading disabled. Remote capture starts only when a viewer is watching. It publishes the latest frame with no playback backlog and bounds frames to 1280 × 960 at JPEG quality 65. Standard desktop capture is limited to five requests per second, with one capture in flight. With the optional bridge, capture requests approximately 15 updates per second, with a bounded CDP still fallback for static pages. Closing the desktop panel parks its native guests without destroying them, so mobile viewing can continue. The desktop application must remain connected. Requests from an agent or mobile viewer start the native browser even when that workspace panel has never been opened on desktop. iOS and Android use their native image component for the JPEG stream. Desktop always displays the actual WebView in hybrid mode, including when the bridge is absent.
 
 Each workspace supports eight native tabs. Take and release control to pass the browser between a person and agents. Native agent tools wait for an in-flight command before a human takeover and reject commands whose lease changed. Dispatched mutations are never automatically retried. Mobile taps target the desktop viewport; the text controls send input to the focused page field.
 
@@ -34,7 +35,7 @@ Native tabs use `persist:paseo-browser`, the same profile as Paseo's built-in br
 
 ## Desktop bridge setup
 
-Paseo's existing desktop WebView APIs support native rendering. Mobile frame capture and full guest CDP require the bridge included in `integrations/paseo/`. Older desktops show an update message.
+Paseo's existing desktop WebView APIs support native rendering, DevTools, mobile capture and mobile taps/text/keys. The optional bridge included in `integrations/paseo/` adds higher-rate capture, full guest CDP and cookie management including HttpOnly cookies. Without it, mobile viewing uses the desktop's built-in screenshot API and remote input targets the same native guest. No independent Chrome session is opened and the desktop does not display a video stream.
 
 On Linux, prepare a separate copy of your existing desktop AppDir:
 
