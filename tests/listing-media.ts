@@ -111,6 +111,16 @@ try {
     await phone.waitForSelector('[aria-label="Live native browser"]', {timeout:10000});
     await phone.waitForFunction('Array.from(document.images).some(image=>image.naturalWidth>0)');
   }
+  if (process.env.PASEO_LISTING_VERIFY_HANDOFF === '1') {
+    const session = await phone.createCDPSession();
+    await session.send('Emulation.setCPUThrottlingRate', {rate:6});
+    await phone.waitForFunction(`Array.from(document.querySelectorAll('[aria-label="Live native browser"]')).some(node=>getComputedStyle(node).opacity==='1')`);
+    const result = await phone.evaluate(`new Promise(resolve=>{let samples=0,missing=0,maxLayers=0;const started=performance.now();function check(){const layers=Array.from(document.querySelectorAll('[aria-label="Live native browser"]'));maxLayers=Math.max(maxLayers,layers.length);if(!layers.some(node=>getComputedStyle(node).opacity==='1'))missing++;samples++;if(performance.now()-started<3000)requestAnimationFrame(check);else resolve({samples,missing,maxLayers});}check();})`);
+    assert.equal((result as {missing:number}).missing, 0, JSON.stringify(result));
+    assert.ok((result as {maxLayers:number}).maxLayers <= 2, JSON.stringify(result));
+    console.log('Retained frame handoff under CPU throttling:', JSON.stringify(result));
+    await session.detach();
+  }
   await phone.screenshot({ path: join(mediaDirectory, 'native-mobile.png') });
   console.log('Captured native desktop and same-session mobile screenshots.');
 } finally {

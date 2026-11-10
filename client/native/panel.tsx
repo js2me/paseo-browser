@@ -1,16 +1,21 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { NativeDesktopService } from "./desktop-service";
 import { z } from "zod";
-import { AppState, Image, ScrollView, Pressable, Text, TextInput, View } from "react-native";
+import { AppState, ScrollView, Pressable, Text, TextInput, View } from "react-native";
 import { type PluginWorkspacePanelProps, useRpc, useTabState } from "@getpaseo/plugin/client";
 import {
   nativeActionRpc,
   nativeControlRpc,
   nativeWatchRpc,
-  type NativeFrame,
   type NativeState,
 } from "../../shared/native/contracts";
 import { nativeDesktopBrowserApi, nativeTouchPoint } from "../workspace/web";
+
+import { BrowserFrameImage } from "../workspace/browser-frame-image";
+import { useBrowserFrameBuffer } from "../workspace/use-browser-frame-buffer";
+import type { BrowserFrame } from "../../shared/workspace/browser";
+import type { FrameCandidate } from "../workspace/browser-frame-buffer";
+import { nativeFrameCandidate } from "./frame-candidate";
 
 const nativeTabState = z.object({ url: z.string().default("about:blank") });
 export function NativeBrowserPanel({
@@ -40,7 +45,18 @@ export function NativeBrowserPanel({
   const host = useRef<View | null>(null);
   const mirror = useRef<View | null>(null);
   const [state, setState] = useState<NativeState | null>(null);
-  const [frame, setFrame] = useState<NativeFrame | null>(null);
+  const stateRef = useRef<NativeState | null>(null);
+  const visibleFrameRef = useRef<BrowserFrame | null>(null);
+  const frameScope = `${workspaceId}/${clientId}`;
+  const isCurrentFrame = useCallback((candidate: FrameCandidate) =>
+    activeRef.current && candidate.viewerToken === frameScope &&
+    candidate.frame.sessionId === stateRef.current?.browserId &&
+    candidate.frame.navigationGeneration === stateRef.current?.generation,
+  [frameScope]);
+  const { buffer, frame, receive, settled, reset, discardObsoletePending } = useBrowserFrameBuffer(
+    visibleFrameRef, isCurrentFrame,
+  );
+  const retryFrame = useCallback(() => {}, []);
   const [error, setError] = useState<string | null>(null);
   const [controller, setController] = useState<string | null>(null);
   const [urlDraft, setUrl] = useState<string | null>(null);
@@ -93,7 +109,7 @@ export function NativeBrowserPanel({
   useEffect(() => {
     if (desktop) return;
     if (!active) {
-      setFrame(null);
+      reset();
       if (ownRef.current)
         void control({ workspaceId, viewerId: clientId, action: "release" }).catch(() => {});
       return;
@@ -105,11 +121,14 @@ export function NativeBrowserPanel({
       try {
         const reply = await watch({ workspaceId, viewerId: clientId, afterSequence: sequence });
         if (stopped) return;
+        if (stateRef.current?.browserId !== reply.state?.browserId) reset();
+        stateRef.current = reply.state;
         setState(reply.state);
+        discardObsoletePending();
         setController(reply.controller);
         if (reply.frame) {
           sequence = reply.frame.sequence;
-          setFrame(reply.frame);
+          receive(nativeFrameCandidate(reply.frame, frameScope));
         }
         setError(
           reply.connected
@@ -128,7 +147,7 @@ export function NativeBrowserPanel({
       stopped = true;
       clearTimeout(timer);
     };
-  }, [desktop, workspaceId, clientId, watch, active]);
+  }, [desktop, workspaceId, clientId, watch, active, receive, reset, discardObsoletePending, frameScope]);
   const run = async (
     operation:
       | "navigate"
@@ -235,8 +254,8 @@ export function NativeBrowserPanel({
             if (
               !own ||
               !frame ||
-              frame.browserId !== state?.browserId ||
-              frame.generation !== state?.generation ||
+              frame.sessionId !== state?.browserId ||
+              frame.navigationGeneration !== state?.generation ||
               !imageSize.width ||
               !imageSize.height
             )
@@ -249,19 +268,28 @@ export function NativeBrowserPanel({
             void run("input", {
               x: (x * (state?.width ?? frame.width)) / frame.width,
               y: (y * (state?.height ?? frame.height)) / frame.height,
-              generation: frame.generation,
-              browserId: frame.browserId,
+              generation: frame.navigationGeneration,
+              browserId: frame.sessionId,
             });
           }}
         >
-          {frame ? (
-            <Image
-              accessibilityLabel="Live native browser"
-              source={{ uri: frame.data }}
-              style={{ flex: 1, width: "100%", height: "100%" }}
-              resizeMode="contain"
+          {buffer.layers.map((layer) => layer ? (
+            <BrowserFrameImage
+              key={layer.ticket}
+              ticket={layer.ticket}
+              source={layer.source}
+              visible={buffer.front !== null && buffer.layers[buffer.front]?.ticket === layer.ticket}
+              label="Live native browser"
+              x={0}
+              y={0}
+              width={imageSize.width}
+              height={imageSize.height}
+              cornerRadius={0}
+              settled={settled}
+              retry={retryFrame}
             />
-          ) : (
+          ) : null)}
+          {!frame && (
             <Text style={{ ...foreground, padding: 16 }}>Waiting for the desktop browser…</Text>
           )}
         </Pressable>
