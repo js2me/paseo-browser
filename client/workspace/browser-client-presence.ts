@@ -1,6 +1,5 @@
 /** Own composer-pill presence subscription and paging; teardown fences late directory replies and releases only this contribution. */
 import { nativePresenceRpc } from '../../shared/native/contracts';
-import { createBrowserPanelAutoOpen } from "./auto-open";
 import { createBrowserHeaderIcon } from "./browser-header";
 import type { PluginClientContext } from "@getpaseo/plugin/client";
 import { listOpenBrowserWorkspacesRpc } from "../../shared/workspace/browser";
@@ -23,10 +22,7 @@ export function contributeSharedBrowserClient(client: PluginClientContext) {
   const agents = new Map<string, AgentPlacement>();
   const pills = new Map<string, { workspaceId: string; remove: () => void }>();
   const headerButtons = new Map<string, { remove(): void }>();
-  const autoOpen = createBrowserPanelAutoOpen((workspaceId) => {
-    client.openPanel('workspace-browser', { workspaceId, location: 'explorer' });
-  });
-  const HeaderIcon = createBrowserHeaderIcon(autoOpen);
+  const HeaderIcon = createBrowserHeaderIcon();
   const lifetime = new AbortController();
   let openWorkspaceIds = new Set<string>();
   let refreshing = false;
@@ -94,12 +90,14 @@ export function contributeSharedBrowserClient(client: PluginClientContext) {
     if (stopped || refreshing) return;
     refreshing = true;
     try {
-      const result = await client.rpc(listOpenBrowserWorkspacesRpc, {});
+      const [result, native] = await Promise.all([
+        client.rpc(listOpenBrowserWorkspacesRpc, {}),
+        client.rpc(nativePresenceRpc, {}),
+      ]);
       if (stopped) return;
-      const native = await client.rpc(nativePresenceRpc, {});
-      const workspaceIds = [...new Set([...result.workspaceIds,...native.workspaceIds,...native.requestedWorkspaceIds])];
+      // Requests waiting for a desktop are not open browser sessions.
+      const workspaceIds = [...new Set([...result.workspaceIds, ...native.workspaceIds])];
       openWorkspaceIds = new Set(workspaceIds);
-      autoOpen.presence(workspaceIds);
       syncAllPills();
     } catch {
       return;
@@ -211,7 +209,6 @@ export function contributeSharedBrowserClient(client: PluginClientContext) {
     unsubscribeDirectory?.();
     void releaseDirectory?.().catch(() => undefined);
     lifetime.abort();
-    autoOpen.dispose();
     for (const button of headerButtons.values()) button.remove();
     headerButtons.clear();
     for (const { remove } of pills.values()) remove();

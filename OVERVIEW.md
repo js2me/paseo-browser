@@ -8,7 +8,7 @@ Legacy workspace mode uses Chrome on the daemon and streams it to every client. 
 
 ## Browser control
 
-A native workspace supports eight tabs. People take and release control to pass the browser to agents; agents cannot take control from a person. Desktop DevTools opens in a separate window after taking control. Native mobile controls support taps, text insertion and Enter against the desktop viewport. The desktop panel can be closed while its browser continues serving mobile viewers.
+A native workspace supports eight tabs. Open its panel with the browser button, Command Center or session sidebar. Agents can browse in the background while you stay in chat. People take and release control to pass the browser to agents; agents cannot take control from a person. Desktop DevTools opens in a separate window after taking control. Native mobile controls support taps, text insertion and Enter against the desktop viewport. The desktop panel can be closed while its browser continues serving mobile viewers.
 
 Agents can navigate, read accessibility snapshots, fill forms, upload files, run JavaScript, inspect console and network activity, manage cookies including HttpOnly cookies, and issue guest-scoped Chrome DevTools Protocol commands. Existing agent sessions may need reloading to discover the tools. Codex, Claude Code, Copilot and OpenCode receive the browser adapter by default; settings and the agent label `paseo-browser/enabled=false` can disable it.
 

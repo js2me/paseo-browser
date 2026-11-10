@@ -1,32 +1,9 @@
 import type { PluginButtonIconProps } from '@getpaseo/plugin/client';
 import { Icon } from '@getpaseo/plugin/client/ui';
-import { useRpc } from '@getpaseo/plugin/client';
-import { useQuery } from '@tanstack/react-query';
-import { useEffect } from 'react';
-import { listOpenBrowserWorkspacesRpc } from '../../shared/workspace/browser';
-import { nativePresenceRpc } from '../../shared/native/contracts';
-import type { BrowserPanelAutoOpen } from './auto-open';
 
-/** Paseo mounts a workspace header's icon for the displayed workspace, not background agents. */
-export function createBrowserHeaderIcon(autoOpen: BrowserPanelAutoOpen) {
-  return function BrowserHeaderIcon({ workspaceId, host, size, color }: PluginButtonIconProps) {
-    const readPresence = useRpc(listOpenBrowserWorkspacesRpc);
-    const readNativePresence = useRpc(nativePresenceRpc);
-    const presence = useQuery({
-      queryKey: ['workspace-browser', 'header-presence', host.id],
-      queryFn: async () => {
-        const [legacy,native] = await Promise.all([readPresence({}),readNativePresence({})]);
-        return [...new Set([...legacy.workspaceIds,...native.workspaceIds,...native.requestedWorkspaceIds])];
-      },
-      refetchInterval: 1_000,
-      retry: false,
-    });
-    const hasBrowser = presence.data?.includes(workspaceId);
-    useEffect(() => {
-      if (hasBrowser === undefined) return;
-      try { autoOpen.reveal(workspaceId, hasBrowser); }
-      catch (error) { console.error('Could not open the workspace browser panel', error); }
-    }, [workspaceId, hasBrowser]);
+/** Rendering a header or composer icon must not open panels or request a browser. */
+export function createBrowserHeaderIcon() {
+  return function BrowserHeaderIcon({ size, color }: PluginButtonIconProps) {
     return <Icon name="PanelsTopLeft" size={size} color={color} />;
   };
 }

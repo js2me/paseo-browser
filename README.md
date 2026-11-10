@@ -47,7 +47,7 @@ This copies the application, updates its ASAR browser bridge, preserves native d
 
 For a source build, apply `integrations/paseo/native-bridge.patch` to the documented Paseo revision and build its desktop package. See [bridge details](integrations/paseo/README.md).
 
-Open **Open Workspace Browser** in the Command Center or the browser composer/header button. Agent browser requests reveal the panel in the displayed workspace. The phone shows the native desktop's broadcast. A workspace whose desktop browser is not available reports that condition instead of opening an independent Chrome.
+Open **Open Workspace Browser** in the Command Center or press the browser composer/header button. The panel opens only through these explicit actions or a browser-session sidebar entry. Agents can work with the browser in the background while you stay in chat. The phone shows the native desktop's broadcast. A workspace whose desktop browser is not available reports that condition instead of opening an independent Chrome.
 
 <details>
 <summary>Mobile view of the same desktop session</summary>
