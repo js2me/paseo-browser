@@ -1,3 +1,4 @@
+import { NATIVE_BROWSER_AGENT_INSTRUCTIONS } from "../../shared/agent-guidance";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -61,8 +62,7 @@ const server = new Server(
   { name: "paseo-browser-native", version: "0.4.0" },
   {
     capabilities: { tools: {} },
-    instructions:
-      "Use this native shared browser. On desktop it is a real Chromium WebView, on mobile the same guest is broadcast. Open with native_browser_open, acquire shared_browser_acquire_control before actions, then release control. Use native_browser_automation for snapshots and page input, evaluate_script for JavaScript, and cdp_send/browser_cookies for full CDP when the desktop bridge is installed. Do not open an independent headless Chrome as a fallback.",
+    instructions: NATIVE_BROWSER_AGENT_INSTRUCTIONS,
   },
 );
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));

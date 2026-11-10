@@ -3,7 +3,6 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { browserSettings } from "./shared/settings";
 import { browserServer, shouldAttach } from "./server/browser";
 import runtime from "./server/runtime.json";
-import { withBrowserGuidance, withNativeBrowserGuidance } from "./shared/agent-guidance";
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -21,26 +20,6 @@ export default function contribute(server: PluginServerContext) {
   // The daemon may run inside Electron: use a real Node executable for stdio MCP.
   const nodePath = runtime.nodePath;
   const workspaceCleanup = contributeWorkspace(server);
-  const removeCreateHook = server.addHook("agent.create.before", async ({ request }) => {
-    const current = await settings.read();
-    if (
-      current.status !== "ready" ||
-      !current.values.enabled ||
-      request.config.internal ||
-      !current.values.providers.includes(request.config.provider)
-    )
-      return;
-    return {
-      ...request,
-      config: {
-        ...request.config,
-        systemPrompt:
-          current.values.mode === "hybrid"
-            ? withNativeBrowserGuidance(request.config.systemPrompt)
-            : withBrowserGuidance(request.config.systemPrompt),
-      },
-    };
-  });
   const removeHook = server.addHook("agent.open.before", async ({ request }) => {
     const current = await settings.read();
     if (current.status !== "ready")
@@ -102,7 +81,6 @@ export default function contribute(server: PluginServerContext) {
     };
   });
   return () => {
-    removeCreateHook();
     removeHook();
     return Promise.all([workspaceCleanup(), native.close()]);
   };

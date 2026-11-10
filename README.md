@@ -73,7 +73,7 @@ Native mode injects the `paseo-browser` MCP adapter:
 
 Acquire control before actions and release afterward. `native_browser_automation` takes `{ name, args }`; use element refs from its current `snapshot`. Native browser IDs come from `shared_browser_tabs`. Browser-level commands cannot close or crash Paseo; manage native tabs through the dedicated tab tools. Cookie and protocol rules are enforced by Chromium. Native CDP is scoped to the registered guest and its owning window/workspace. Uploads use the desktop's filesystem and Paseo's workspace path checks.
 
-Installation writes runtime adapters under `$PASEO_HOME/plugin-data/paseo-browser/`. The managed skill under `agent-skills/paseo-browser` is installed into the local agent skill directories. Existing agent sessions need reloading to discover the native adapter. Unrelated MCP servers and user prompts are preserved.
+Installation writes runtime adapters under `$PASEO_HOME/plugin-data/paseo-browser/`. The managed skill under `agent-skills/paseo-browser` is installed into the local agent skill directories. Existing agent sessions need reloading to discover the native adapter. The skill is scoped to live page interaction, not code-only work or plugin configuration. Browser tools remain available without modifying agent system prompts. Existing chats can retain instructions loaded before this update. Unrelated MCP servers and user prompts are preserved.
 
 ## Other connection modes
 

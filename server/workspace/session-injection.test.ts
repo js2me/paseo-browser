@@ -42,25 +42,17 @@ it('injects both workspace-bound MCP adapters on resume and refresh, excluding h
   } finally { await cleanup(); }
 });
 
-it('preserves user instructions and adds idempotent browser routing for newly created supported agents', async () => {
-  let createHook: ((event: { request: any }) => Promise<any>) | undefined;
+it('offers browser tools without adding a creation hook or changing agent instructions', async () => {
+  const addHook = vi.fn((_name: string, _handler: unknown) => () => {});
   const server = {
     registerSettings: () => ({ read: async () => ({ status: 'ready', values: browserSchema.parse({ mode:'workspace' }) }) }),
-    handle: () => {},
-    addHook: (name: string, handler: typeof createHook) => { if (name === 'agent.create.before') createHook = handler; return () => {}; },
+    handle: () => {}, addHook,
   } as unknown as PluginServerContext;
   const cleanup = contribute(server);
   try {
-    const request = { config: { provider: 'codex', cwd: '/project', systemPrompt: 'Follow project conventions.' }, env: { ORIGINAL: 'kept' } };
-    const changed = await createHook!({ request });
-    expect(changed.config.systemPrompt).toContain('Follow project conventions.');
-    expect(changed.config.systemPrompt).toContain('paseo-browser-devtools');
-    expect(changed.config.systemPrompt).toContain('CUA/cua_repl');
-    expect(changed.env).toEqual(request.env);
-    const again = await createHook!({ request: changed });
-    expect(again.config.systemPrompt).toBe(changed.config.systemPrompt);
-    await expect(createHook!({ request: { config: { ...request.config, internal: true } } })).resolves.toBeUndefined();
-    await expect(createHook!({ request: { config: { ...request.config, provider: 'unsupported' } } })).resolves.toBeUndefined();
+    const hooks = addHook.mock.calls.map(call => call[0]);
+    expect(hooks).not.toContain('agent.create.before');
+    expect(hooks).toContain('agent.open.before');
   } finally { await cleanup(); }
 });
 

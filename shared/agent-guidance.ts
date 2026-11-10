@@ -1,21 +1,8 @@
-const marker = '[paseo-browser integration]';
+/** Tool-server guidance, not a system-prompt addition to every agent. */
+export const BROWSER_TASK_SCOPE = `These tools operate a live website in Paseo Browser. Use them for requested page interaction or verification in the shared browser. Their availability alone does not call for loading a browser skill, checking browser status or opening a panel. Code-only work, general research and configuration of Paseo or this plugin follow the normal workflow. Respect an explicitly selected different browser integration.`;
 
-export const BROWSER_AGENT_INSTRUCTIONS = `${marker}
-For browser tasks in Paseo, prefer the installed paseo-browser and paseo-browser-devtools MCP tools when available, unless the user explicitly chooses another browser integration.
-Discover these tools before selecting a browser: in code-mode, filter ALL_TOOLS for paseo_browser or shared_browser. Their exported names may use underscores instead of hyphens.
-Workspace flow: shared_browser_status, shared_browser_acquire_control, shared_browser_navigate or DevTools tools, then shared_browser_release_control. Use the tab/page IDs returned by these tools and report the actual result.
-Full Chrome control is available through DevTools: browser_cookies reads/imports/sets/deletes cookies including HttpOnly, cdp_send runs arbitrary Chrome DevTools Protocol commands, and cdp_events reads enabled protocol events. Use Target.getTargets for CDP targetIds; these differ from DevTools pageIds. Use evaluate_script for page JavaScript and localStorage/sessionStorage. Cookies and storage share the workspace profile and panel. CDP covers DOM, network interception, debugger, emulation, permissions and storage; Chrome's protocol and website rules still apply.
-CUA/cua_repl and its browser access host are a separate integration. A CUA "browser access host is unavailable" error does not mean Paseo Browser is unavailable; check the Paseo Browser tools before reporting failure. Do not use shell scripts or open an unrelated browser as a workaround when these tools are available.
-Never force an agent takeover from a human. If a human controls the browser, explain that control needs to be released.`;
+export const BROWSER_AGENT_INSTRUCTIONS = `${BROWSER_TASK_SCOPE}
+For a browser task, use paseo-browser and paseo-browser-devtools for the same workspace session: shared_browser_status, shared_browser_acquire_control, navigation or DevTools actions, then shared_browser_release_control. Use returned tab/page IDs and current snapshots. Cookies, JavaScript, console/network inspection and CDP use that session. Never force control from a person. During an actual browser task, an unavailable CUA host does not imply these tools are unavailable.`;
 
-export function withBrowserGuidance(prompt?: string): string {
-  if (prompt?.includes(marker)) return prompt;
-  return [prompt?.trim(), BROWSER_AGENT_INSTRUCTIONS].filter(Boolean).join('\n\n');
-}
-
-export function withNativeBrowserGuidance(prompt?: string): string {
-  const nativeMarker = '[paseo-browser native integration]';
-  if (prompt?.includes(nativeMarker)) return prompt;
-  return [prompt?.trim(), `${nativeMarker}
-Use the paseo-browser native MCP tools for browser tasks. native_browser_open opens a real Chromium WebView inside the desktop workspace browser panel; the mobile panel broadcasts that exact guest. Keep the desktop connected. Call shared_browser_acquire_control before navigation, JavaScript, CDP or cookies, and shared_browser_release_control afterward. Use native_browser_automation for snapshots, forms, input, screenshots and network/console logs. Use evaluate_script for JavaScript, browser_cookies for cookie import/export, and cdp_send/cdp_events for full protocol access when the desktop native bridge is installed. Native mode never launches a separate daemon Chrome. If the desktop or bridge is unavailable, report that specific condition; do not silently switch to the legacy streamed browser. Never force control from a human.`].filter(Boolean).join('\n\n');
-}
+export const NATIVE_BROWSER_AGENT_INSTRUCTIONS = `${BROWSER_TASK_SCOPE}
+For a browser task, native_browser_open opens the desktop WebView and mobile broadcasts the same guest. Keep Paseo Desktop connected. Acquire shared_browser_acquire_control before actions and release afterward. Use native_browser_automation for snapshots and page input, evaluate_script for JavaScript, browser_cookies for cookies, and cdp_send/cdp_events for guest protocol access. Full CDP and mobile sharing require the desktop bridge. Report a missing desktop or bridge; never silently replace the native session or force control from a person.`;

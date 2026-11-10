@@ -1,13 +1,15 @@
 ---
 name: paseo-browser
-description: Use the installed Paseo Browser plugin to open websites, browse pages, test web apps, fill forms or inspect network and console in Chrome shared with the user. Applies to browser tasks inside Paseo and to recovery from an unavailable CUA browser host. Respect an explicitly selected different browser integration.
+description: Operate a live website in the shared Paseo Browser when asked to open or interact with a page, inspect its DevTools, or verify behavior in that browser. Not for code-only work, general research, or configuring Paseo, browser tooling, or this plugin.
 ---
 
 <!-- Managed by paseo-browser plugin. -->
 
-Use `paseo-browser` / `paseo-browser-devtools` MCP tools when they are available. These control Chrome shown in Paseo's Workspace Browser panel. CUA's browser host is a separate integration; its absence does not indicate a Paseo Browser failure.
+Apply this skill when the task requires actual interaction with a live page in Paseo Browser. A request to open a site, fill a form, inspect its live console/network, or verify behavior in the shared browser qualifies. Merely editing frontend code, reading a URL, discussing cookies, or configuring a plugin does not. Do not load the skill, query browser status or open a panel just because browser tools are available.
 
-Discover the exact tool names before choosing a browser backend. In code-mode, filter `ALL_TOOLS` by `paseo_browser` or `shared_browser`, then invoke the matching functions on `tools`. Typical names include `mcp__paseo_browser__shared_browser_status` and `mcp__paseo_browser_devtools__list_pages`.
+For a qualifying browser task, use `paseo-browser` / `paseo-browser-devtools` MCP tools when available. These control Chrome shown in Paseo's Workspace Browser panel. CUA's browser host is a separate integration; its absence does not indicate a Paseo Browser failure.
+
+Once Paseo Browser is selected for a browser task, discover the exact tool names. In code-mode, filter `ALL_TOOLS` by `paseo_browser` or `shared_browser`, then invoke the matching functions on `tools`. Typical names include `mcp__paseo_browser__shared_browser_status` and `mcp__paseo_browser_devtools__list_pages`.
 
 When `native_browser_open` is available, use native mode (the default):
 
@@ -40,6 +42,6 @@ For full site control:
 
 All these tools control the same workspace profile and are fenced by the existing exclusive control lease. Chrome validates cookie/security/protocol rules; this does not bypass server-side access checks. Get explicit `pageId` values from `list_pages`; shared tab IDs come from `shared_browser_tabs`. Check current snapshots before using element UIDs.
 
-If CUA fails with “browser access host is unavailable”, check these plugin tools before telling the user browser access is unavailable. Do not fall back to shell automation or a separate browser when the plugin tools work. If these tools are genuinely absent, say so and suggest reloading the agent after enabling the plugin.
+During an actual browser task, if CUA fails with “browser access host is unavailable”, check these plugin tools before telling the user browser access is unavailable. Do not fall back to shell automation or a separate browser when the plugin tools work. If these tools are genuinely absent, say so and suggest reloading the agent after enabling the plugin.
 
 The user's specific browser choice and normal permissions still apply. The plugin does not authorize unrelated form submissions, purchases, messages or account changes.
