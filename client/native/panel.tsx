@@ -57,11 +57,14 @@ export function NativeBrowserPanel({
     visibleFrameRef, isCurrentFrame,
   );
   const retryFrame = useCallback(() => {}, []);
-  const [error, setError] = useState<string | null>(null);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const error = actionError ?? connectionError;
   const [controller, setController] = useState<string | null>(null);
   const [urlDraft, setUrl] = useState<string | null>(null);
   const [remembered, setRemembered] = useTabState(tab, nativeTabState, { url: "about:blank" });
-  const url = urlDraft ?? (state?.url.startsWith("http") ? state.url : "https://www.google.com");
+  const url = urlDraft ?? (state?.url.startsWith("http") ? state.url : "");
+  const empty = state?.url === "about:blank";
   const [text, setText] = useState("");
   useEffect(() => {
     if (state?.url.startsWith("http") && state.url !== remembered.url)
@@ -85,25 +88,26 @@ export function NativeBrowserPanel({
     };
   }, [workspaceId, clientId, control]);
   const changeControl = () => {
+    setActionError(null);
     void control({ workspaceId, viewerId: clientId, action: own ? "release" : "acquire" })
       .then((result) => {
         if (alive.current && (desktop || activeRef.current)) setController(result.controller);
         else void control({ workspaceId, viewerId: clientId, action: "release" }).catch(() => {});
       })
       .catch((error) => {
-        if (alive.current) setError(String(error));
+        if (alive.current) setActionError(String(error));
       });
   };
   useEffect(() => {
     if (!desktop) return;
     if (!service) {
-      setError("Reload the plugin to reconnect its native browser service.");
+      setConnectionError("Reload the plugin to reconnect its native browser service.");
       return;
     }
     return service.attach(workspaceId, host.current, remembered.url, (snapshot) => {
       setState(snapshot.state);
       setController(snapshot.controller);
-      setError(snapshot.error);
+      setConnectionError(snapshot.error);
     });
   }, [desktop, workspaceId, clientId, service]);
   useEffect(() => {
@@ -130,13 +134,13 @@ export function NativeBrowserPanel({
           sequence = reply.frame.sequence;
           receive(nativeFrameCandidate(reply.frame, frameScope));
         }
-        setError(
+        setConnectionError(
           reply.connected
             ? reply.error
             : "Waiting for a connected Paseo Desktop to start this workspace browser.",
         );
       } catch (error) {
-        if (!stopped) setError(String(error));
+        if (!stopped) setConnectionError(String(error));
       }
       if (!stopped) timer = setTimeout(() => void read(), 66);
     };
@@ -158,23 +162,29 @@ export function NativeBrowserPanel({
       | "tabs.close",
     input: Record<string, unknown> = {},
   ) => {
+    if (!ownRef.current) {
+      setActionError("Take control before opening a website or interacting with this tab.");
+      return;
+    }
     try {
-      setError(null);
+      setActionError(null);
       await action({ workspaceId, viewerId: clientId, operation, input });
       if (operation === "navigate") setUrl(null);
     } catch (error) {
-      setError(String(error));
+      setActionError(String(error));
     }
   };
   return (
     <View style={{ flex: 1, backgroundColor: theme.colors.surface0 }}>
       <View style={{ flexDirection: "row", gap: 8, padding: 8, alignItems: "center" }}>
-        <Pressable onPress={changeControl}>
+        <Pressable accessibilityRole="button" onPress={changeControl}>
           <Text style={foreground}>{own ? "Release" : "Take control"}</Text>
         </Pressable>
         <TextInput
           accessibilityLabel="Native browser address"
           value={url}
+          placeholder="Enter website address"
+          placeholderTextColor={theme.colors.foregroundMuted}
           onChangeText={setUrl}
           autoCapitalize="none"
           onSubmitEditing={() => void run("navigate", { url })}
@@ -187,7 +197,13 @@ export function NativeBrowserPanel({
             padding: 8,
           }}
         />
-        <Pressable onPress={() => void run("navigate", { url })}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Open website"
+          disabled={!own || !url.trim() || !state}
+          style={{ opacity: own && url.trim() && state ? 1 : 0.5 }}
+          onPress={() => void run("navigate", { url })}
+        >
           <Text style={foreground}>Go</Text>
         </Pressable>
         {desktop && (
@@ -199,10 +215,10 @@ export function NativeBrowserPanel({
             style={{ opacity: own && state && service ? 1 : 0.5 }}
             onPress={() => {
               try {
-                setError(null);
+                setActionError(null);
                 service!.openDevTools(workspaceId);
               } catch (error) {
-                setError(String(error));
+                setActionError(String(error));
               }
             }}
           >
@@ -210,6 +226,11 @@ export function NativeBrowserPanel({
           </Pressable>
         )}
       </View>
+      {!own && (
+        <Text style={{ color: theme.colors.foregroundMuted, paddingHorizontal: 8, paddingBottom: 8 }}>
+          Take control to open a website or interact with this tab.
+        </Text>
+      )}
       {state?.tabs && (
         <ScrollView horizontal style={{ maxHeight: 38 }}>
           {state.tabs.map((tab) => (
@@ -250,7 +271,7 @@ export function NativeBrowserPanel({
           onLayout={(event) => setImageSize(event.nativeEvent.layout)}
           onPress={(event) => {
             if (
-              !own ||
+              !own || empty ||
               !frame ||
               frame.sessionId !== state?.browserId ||
               frame.navigationGeneration !== state?.generation ||
@@ -287,7 +308,19 @@ export function NativeBrowserPanel({
               retry={retryFrame}
             />
           ) : null)}
-          {!frame && (
+          {empty && (
+            <View
+              pointerEvents="none"
+              style={{ position: "absolute", top: 0, bottom: 0, left: 0, right: 0,
+                backgroundColor: theme.colors.surface0, alignItems: "center", justifyContent: "center", padding: 16 }}
+            >
+              <Text style={foreground}>No website open</Text>
+              <Text style={{ color: theme.colors.foregroundMuted, marginTop: 8 }}>
+                Enter an address and press Go after taking control.
+              </Text>
+            </View>
+          )}
+          {!frame && !empty && (
             <Text style={{ ...foreground, padding: 16 }}>Waiting for the desktop browser…</Text>
           )}
         </Pressable>
