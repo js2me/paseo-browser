@@ -206,8 +206,10 @@ export class NativeRelay {
         throw Error("Browser control transfer is pending");
       if (workspace.control && workspace.control.id !== id && (!human || workspace.control.human))
         throw Error("Browser is controlled by another participant");
-      const pending = [...workspace.pending.values()].find((p) => p.dispatched && p.owner !== id);
-      if (pending) {
+      for (;;) {
+        if (this.stopped) throw Error("Native browser relay stopped");
+        const pending = [...workspace.pending.values()].find((p) => p.dispatched && p.owner !== id);
+        if (!pending) break;
         workspace.takeover = id;
         await pending.settled;
       }

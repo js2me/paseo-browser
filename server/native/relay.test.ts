@@ -208,3 +208,23 @@ it("allows event reads and dialog replies while an earlier command waits, retain
   exchange(relay, [{ id: next.id, result: {} }]);
   await navigating;
 });
+
+it("waits for every dispatched command before handing control to a human", async () => {
+  const relay = fixture();
+  exchange(relay);
+  await relay.control("workspace", "agent", false, "acquire");
+  const evaluating = relay.command("workspace", "agent", "cdp_send", { method: "Runtime.evaluate" });
+  const evaluation = exchange(relay).commands[0];
+  const inspecting = relay.command("workspace", "agent", "cdp_send", { method: "Debugger.evaluateOnCallFrame" });
+  const inspection = exchange(relay).commands[0];
+  expect(inspection.input.method).toBe("Debugger.evaluateOnCallFrame");
+  const takeover = relay.control("workspace", phone, true, "acquire");
+  exchange(relay, [{ id: evaluation.id, result: 42 }]);
+  await evaluating;
+  await Promise.resolve();
+  expect(relay.watch("workspace", phone, 0).controller).toBe("agent");
+  expect(exchange(relay).commands).toEqual([]);
+  exchange(relay, [{ id: inspection.id, result: {} }]);
+  await inspecting;
+  expect(await takeover).toEqual({ controller: phone });
+});
