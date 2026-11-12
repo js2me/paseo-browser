@@ -26,6 +26,16 @@ type Workspace = {
 };
 const OWNER_TTL = 5_000;
 const VIEWER_TTL = 2_500;
+const CDP_UNBLOCKERS = new Set([
+  "Page.handleJavaScriptDialog", "Debugger.resume", "Debugger.stepInto", "Debugger.stepOut",
+  "Debugger.stepOver", "Debugger.disable", "Runtime.terminateExecution", "Runtime.runIfWaitingForDebugger",
+  "Fetch.continueRequest", "Fetch.continueResponse", "Fetch.fulfillRequest", "Fetch.failRequest",
+  "Fetch.continueWithAuth", "Fetch.disable",
+]);
+function canUnblock(command: NativeCommand): boolean {
+  return command.operation === "cdp_events" || command.operation === "browser_dialog" ||
+    (command.operation === "cdp_send" && typeof command.input.method === "string" && CDP_UNBLOCKERS.has(command.input.method));
+}
 const CONTROL_TTL = 30_000;
 
 /** Workspace-bound command mailbox. Published mutations are never retried. */
@@ -131,13 +141,11 @@ export class NativeRelay {
       else pending.resolve(result.result);
     }
     const commands: NativeCommand[] = [];
-    // One in-flight command preserves native input and CDP ordering.
-    if (
-      input.state &&
-      !workspace.takeover &&
-      ![...workspace.pending.values()].some((p) => p.dispatched)
-    ) {
+    // Keep input ordered, but permit event reads and replies that unblock paused JavaScript.
+    const inFlight = [...workspace.pending.values()].some((p) => p.dispatched);
+    if (input.state && !workspace.takeover) {
       for (const next of workspace.pending.values()) {
+        if (next.dispatched || (inFlight && !canUnblock(next.command))) continue;
         if (
           !["tabs.list", "open"].includes(next.command.operation) &&
           workspace.control?.id !== next.owner

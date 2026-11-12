@@ -179,3 +179,27 @@ it('announces mobile viewer demand before a desktop browser exists', () => {
   now += 3000;
   expect(relay.presence().requestedWorkspaceIds).toEqual([]);
 });
+
+it("allows event reads and dialog replies while an earlier command waits, retaining ordinary action ordering", async () => {
+  const relay = fixture();
+  exchange(relay);
+  await relay.control("workspace", "agent", false, "acquire");
+  const evaluating = relay.command("workspace", "agent", "cdp_send", { method: "Runtime.evaluate" });
+  const evaluation = exchange(relay).commands[0];
+  const navigating = relay.command("workspace", "agent", "navigate", {});
+  const reading = relay.command("workspace", "agent", "cdp_events", {});
+  const events = exchange(relay).commands[0];
+  expect(events.operation).toBe("cdp_events");
+  exchange(relay, [{ id: events.id, result: { events: [] } }]);
+  await reading;
+  const replying = relay.command("workspace", "agent", "browser_dialog", { accept: false });
+  const reply = exchange(relay).commands[0];
+  expect(reply.operation).toBe("browser_dialog");
+  exchange(relay, [{ id: reply.id, result: {} }]);
+  await replying;
+  const next = exchange(relay, [{ id: evaluation.id, result: {} }]).commands[0];
+  await evaluating;
+  expect(next.operation).toBe("navigate");
+  exchange(relay, [{ id: next.id, result: {} }]);
+  await navigating;
+});

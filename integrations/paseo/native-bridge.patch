@@ -1,3 +1,29 @@
+diff --git a/packages/app/src/desktop/host.ts b/packages/app/src/desktop/host.ts
+index 2541da9..e9890df 100644
+--- a/packages/app/src/desktop/host.ts
++++ b/packages/app/src/desktop/host.ts
+@@ -1,3 +1,10 @@
++import type {
++  NativeBrowserFrameRequest,
++  NativeBrowserCommandRequest,
++  NativeBrowserEventsRequest,
++  NativeBrowserFrame,
++  NativeBrowserEvents,
++} from "@getpaseo/protocol/browser-native";
+ import { Platform } from "react-native";
+ import { getElectronHost } from "@/desktop/electron/host";
+ import type { BrowserKeyboardPolicy } from "@/keyboard";
+@@ -145,6 +152,10 @@ export interface DesktopAttachedBrowserRegistration {
+ }
+ 
+ export interface DesktopBrowserBridge {
++  readonly nativeBridgeVersion?: number;
++  captureNativeFrame?: (input: NativeBrowserFrameRequest) => Promise<NativeBrowserFrame | null>;
++  sendNativeCommand?: (input: NativeBrowserCommandRequest) => Promise<unknown>;
++  readNativeEvents?: (input: NativeBrowserEventsRequest) => Promise<NativeBrowserEvents>;
+   setShortcutPolicy?: (input: BrowserKeyboardPolicy) => Promise<void>;
+   readonly profilePartition?: string;
+   registerAttachedBrowser?: (input: DesktopAttachedBrowserRegistration) => Promise<void>;
 diff --git a/packages/desktop/src/features/browser-automation/ipc.ts b/packages/desktop/src/features/browser-automation/ipc.ts
 index 18e5b84..03e2663 100644
 --- a/packages/desktop/src/features/browser-automation/ipc.ts
@@ -18,29 +44,30 @@ index 18e5b84..03e2663 100644
      const hostContents = (event as { sender?: HostWebContents }).sender;
 diff --git a/packages/desktop/src/features/browser-automation/native-bridge.ts b/packages/desktop/src/features/browser-automation/native-bridge.ts
 new file mode 100644
-index 0000000..6e272e3
+index 0000000..2ef5df8
 --- /dev/null
 +++ b/packages/desktop/src/features/browser-automation/native-bridge.ts
-@@ -0,0 +1,338 @@
+@@ -0,0 +1,348 @@
++import {
++  NativeBrowserFrameRequestSchema,
++  NativeBrowserCommandRequestSchema,
++  NativeBrowserEventsRequestSchema,
++} from "@getpaseo/protocol/browser-native";
 +import { ipcMain, nativeImage, type WebContents } from "electron";
++import type { NativeBrowserEvent, NativeBrowserFrame } from "@getpaseo/protocol/browser-native";
 +import {
 +  getPaseoBrowserWebContentsForHostWindow,
 +  getPaseoBrowserWorkspaceId,
 +} from "../browser-webviews/index.js";
 +
-+interface NativeEvent {
-+  method: string;
-+  params: Record<string, unknown>;
-+  sessionId?: string;
-+}
 +interface Capture {
 +  tail: Promise<unknown>;
-+  events: NativeEvent[];
++  events: NativeBrowserEvent[];
 +  bytes: number;
 +  dropped: number;
 +  rawFrame: { data: string; sessionId: number; metadata: { timestamp?: number } } | null;
 +  acknowledgements: Set<number>;
-+  frame: { data: string; width: number; height: number; capturedAt: number } | null;
++  frame: NativeBrowserFrame | null;
 +  streaming: boolean;
 +  demandedAt: number;
 +  notBefore: number;
@@ -222,8 +249,8 @@ index 0000000..6e272e3
 +
 +export function registerNativeBrowserBridgeIpc(ipc: NativeIpcRegistry = ipcMain): void {
 +  ipc.handle("paseo:browser:native-frame", async (event, raw: unknown) => {
-+    if (!raw || typeof raw !== "object") throw new Error("Invalid native frame request");
-+    const contents = resolveGuest(hostSender(event), raw as Record<string, unknown>);
++    const input = NativeBrowserFrameRequestSchema.parse(raw);
++    const contents = resolveGuest(hostSender(event), input);
 +    const capture = observe(contents);
 +    capture.demandedAt = Date.now();
 +    if (!capture.streaming) {
@@ -270,20 +297,13 @@ index 0000000..6e272e3
 +    }, 2500);
 +    return capture.frame &&
 +      capture.frame.capturedAt + 1500 > Date.now() &&
-+      capture.frame.capturedAt > Number((raw as Record<string, unknown>).notBefore ?? 0)
++      capture.frame.capturedAt > (input.notBefore ?? 0)
 +      ? capture.frame
 +      : null;
 +  });
 +  ipc.handle("paseo:browser:native-command", async (event, raw: unknown) => {
-+    if (!raw || typeof raw !== "object") throw new Error("Invalid native CDP request");
-+    const input = raw as Record<string, unknown>;
++    const input = NativeBrowserCommandRequestSchema.parse(raw);
 +    const contents = resolveGuest(hostSender(event), input);
-+    if (
-+      typeof input.method !== "string" ||
-+      !/^[A-Za-z]+\.[A-Za-z][A-Za-z0-9]*$/.test(input.method)
-+    ) {
-+      throw new Error("Invalid CDP method");
-+    }
 +    const method = input.method;
 +    const contextMethods = new Set([
 +      "Browser.grantPermissions",
@@ -304,16 +324,13 @@ index 0000000..6e272e3
 +    ) {
 +      throw new Error("Use native browser tab tools for target lifecycle operations");
 +    }
-+    const params =
-+      input.params && typeof input.params === "object" && !Array.isArray(input.params)
-+        ? (input.params as Record<string, unknown>)
-+        : {};
++    const params = input.params ?? {};
 +    if (params.browserContextId !== undefined)
 +      throw new Error("Explicit browser contexts are outside the native guest");
 +    if (Buffer.byteLength(JSON.stringify(params)) > MAX_EVENT_BYTES)
 +      throw new Error("CDP parameters exceed the size limit");
 +    const capture = observe(contents);
-+    const pending = capture.tail.then(async () => {
++    const execute = async () => {
 +      if (contents.isDestroyed()) throw new Error("Native browser was closed");
 +      if (!contents.debugger.isAttached()) contents.debugger.attach("1.3");
 +      if (method === "Target.getTargets" || method === "Target.getTargetInfo") {
@@ -339,15 +356,34 @@ index 0000000..6e272e3
 +        });
 +      }
 +      return contents.debugger.sendCommand(method, params);
-+    });
++    };
++    // A pending Runtime command can wait for a dialog reply or debugger resume.
++    // Queueing its unblocker behind it would leave the guest permanently paused.
++    const unblockers = new Set([
++      "Page.handleJavaScriptDialog",
++      "Debugger.resume",
++      "Debugger.stepInto",
++      "Debugger.stepOut",
++      "Debugger.stepOver",
++      "Debugger.disable",
++      "Runtime.terminateExecution",
++      "Runtime.runIfWaitingForDebugger",
++      "Fetch.continueRequest",
++      "Fetch.continueResponse",
++      "Fetch.fulfillRequest",
++      "Fetch.failRequest",
++      "Fetch.continueWithAuth",
++      "Fetch.disable",
++    ]);
++    if (unblockers.has(method)) return execute();
++    const pending = capture.tail.then(execute);
 +    capture.tail = pending.catch(() => undefined);
 +    return pending;
 +  });
 +  ipc.handle("paseo:browser:native-events", (event, raw: unknown) => {
-+    if (!raw || typeof raw !== "object") throw new Error("Invalid native event request");
-+    const input = raw as Record<string, unknown>;
++    const input = NativeBrowserEventsRequestSchema.parse(raw);
 +    const capture = observe(resolveGuest(hostSender(event), input));
-+    const matches = (item: NativeEvent) =>
++    const matches = (item: NativeBrowserEvent) =>
 +      typeof input.method !== "string" || item.method === input.method;
 +    const events = capture.events.filter(matches);
 +    if (input.clear !== false) capture.events = capture.events.filter((item) => !matches(item));
@@ -361,20 +397,73 @@ index 0000000..6e272e3
 +  });
 +}
 diff --git a/packages/desktop/src/preload.ts b/packages/desktop/src/preload.ts
-index 0942134..4d3f21b 100644
+index 0942134..2aa3282 100644
 --- a/packages/desktop/src/preload.ts
 +++ b/packages/desktop/src/preload.ts
-@@ -115,6 +115,13 @@ contextBridge.exposeInMainWorld("paseoDesktop", {
+@@ -1,3 +1,8 @@
++import type {
++  NativeBrowserFrameRequest,
++  NativeBrowserCommandRequest,
++  NativeBrowserEventsRequest,
++} from "@getpaseo/protocol/browser-native";
+ import { contextBridge, ipcRenderer, webUtils } from "electron";
+ import type { BrowserKeyboardPolicy } from "./features/browser-keyboard/index.js";
+ import type { DesktopWindowChromeMode } from "./window/chrome.js";
+@@ -115,6 +120,13 @@ contextBridge.exposeInMainWorld("paseoDesktop", {
        ipcRenderer.invoke("paseo:menu:set-capturing-shortcut", capturing),
    },
    browser: {
 +    nativeBridgeVersion: 1,
-+    captureNativeFrame: (input: Record<string, unknown>) =>
++    captureNativeFrame: (input: NativeBrowserFrameRequest) =>
 +      ipcRenderer.invoke("paseo:browser:native-frame", input),
-+    sendNativeCommand: (input: Record<string, unknown>) =>
++    sendNativeCommand: (input: NativeBrowserCommandRequest) =>
 +      ipcRenderer.invoke("paseo:browser:native-command", input),
-+    readNativeEvents: (input: Record<string, unknown>) =>
++    readNativeEvents: (input: NativeBrowserEventsRequest) =>
 +      ipcRenderer.invoke("paseo:browser:native-events", input),
      setShortcutPolicy: (input: BrowserKeyboardPolicy) =>
        ipcRenderer.invoke("paseo:browser:set-shortcut-policy", input),
      profilePartition: PASEO_BROWSER_PROFILE_PARTITION,
+diff --git a/packages/protocol/src/browser-native.ts b/packages/protocol/src/browser-native.ts
+new file mode 100644
+index 0000000..8c1f060
+--- /dev/null
++++ b/packages/protocol/src/browser-native.ts
+@@ -0,0 +1,38 @@
++import { z } from "zod";
++
++const guest = {
++  browserId: z.string().min(1).max(256),
++  workspaceId: z.string().min(1).max(256),
++};
++export const NativeBrowserFrameRequestSchema = z.object({
++  ...guest,
++  notBefore: z.number().finite().nonnegative().optional(),
++});
++export const NativeBrowserCommandRequestSchema = z.object({
++  ...guest,
++  method: z.string().regex(/^[A-Za-z]+\.[A-Za-z][A-Za-z0-9]*$/),
++  params: z.record(z.string(), z.unknown()).optional(),
++});
++export const NativeBrowserEventsRequestSchema = z.object({
++  ...guest,
++  method: z.string().optional(),
++  clear: z.boolean().optional(),
++});
++export type NativeBrowserFrameRequest = z.infer<typeof NativeBrowserFrameRequestSchema>;
++export type NativeBrowserCommandRequest = z.infer<typeof NativeBrowserCommandRequestSchema>;
++export type NativeBrowserEventsRequest = z.infer<typeof NativeBrowserEventsRequestSchema>;
++export interface NativeBrowserFrame {
++  data: string;
++  width: number;
++  height: number;
++  capturedAt: number;
++}
++export interface NativeBrowserEvent {
++  method: string;
++  params: Record<string, unknown>;
++  sessionId?: string;
++}
++export interface NativeBrowserEvents {
++  events: NativeBrowserEvent[];
++  dropped: number;
++}

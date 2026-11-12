@@ -1,3 +1,4 @@
+import { isBrowserAction, runBrowserAction, browserActionSchemas } from "../../shared/browser-actions";
 import { advancedToolSchemas } from './advanced-tools';
 
 type Event = { method: string; params: unknown; sessionId?: string };
@@ -77,6 +78,12 @@ export class WorkspaceCdp {
     return id;
   }
   async call(name: string, args: unknown): Promise<unknown> {
+    if (isBrowserAction(name)) {
+      const input = browserActionSchemas[name].parse(args);
+      if (!input.targetId) throw Error('A page targetId from Target.getTargets is required');
+      const sessionId = await this.session(input.targetId);
+      return runBrowserAction(name, input, (method, params) => this.send(method, params, sessionId));
+    }
     if (name === 'cdp_send') {
       const input = advancedToolSchemas.cdp_send.parse(args);
       return this.send(input.method, input.params, await this.session(input.targetId));

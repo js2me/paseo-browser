@@ -1,3 +1,4 @@
+import { isBrowserAction, runBrowserAction } from "../../shared/browser-actions";
 /**
  * Web-only input and video adapters for the native View's DOM host node. No DOM globals or
  * handlers leak into the cross-platform panel. Non-passive wheel/touch listeners
@@ -404,6 +405,7 @@ export function bindBrowserVideoVisibility(
 
 // Native plugin webviews use the same validated guest registration as Paseo's built-in panes.
 interface NativeDesktopBrowserApi {
+  nativeBridgeVersion?: number;
   profilePartition: string;
   registerAttachedBrowser(input: {
     browserId: string;
@@ -624,7 +626,7 @@ export function mountNativeGuest(
         canGoForward: guest.canGoForward(),
         cdp:
           typeof api.sendNativeCommand === "function" &&
-          typeof api.captureNativeFrame === "function",
+          typeof api.readNativeEvents === "function",
       };
     } catch {
       return null;
@@ -633,7 +635,7 @@ export function mountNativeGuest(
   const cdp = async (method: string, params: Record<string, unknown> = {}) => {
     if (!api.sendNativeCommand)
       throw Error(
-        "Full CDP requires the Paseo native browser bridge. Install the desktop bridge patch included with this plugin.",
+        "Full DevTools access requires a Paseo Desktop version with the native DevTools API. Update Paseo Desktop; no plugin patch is needed.",
       );
     return api.sendNativeCommand({ browserId, workspaceId, method, params });
   };
@@ -804,10 +806,16 @@ export function mountNativeGuest(
         });
         return {};
       }
+      if (isBrowserAction(command.operation))
+        return runBrowserAction(command.operation, input, async (method, params) => {
+          if (method === "Runtime.evaluate")
+            return { result: { value: await guest.executeJavaScript(String(params.expression)) } };
+          return cdp(method, params);
+        });
       if (command.operation === "cdp_send")
         return cdp(String(input.method), (input.params ?? {}) as Record<string, unknown>);
       if (command.operation === "cdp_events") {
-        if (!api.readNativeEvents) throw Error("Desktop native CDP bridge is unavailable");
+        if (!api.readNativeEvents) throw Error("Update Paseo Desktop to a version with the native DevTools API");
         return api.readNativeEvents({
           browserId,
           workspaceId,

@@ -372,7 +372,7 @@ export function NativeBrowserPanel({
           ? "Native Chromium"
           : `Live desktop broadcast${layout.compact ? "" : " · same browser session"}`}{" "}
         · {state?.title || state?.url || "No page"}
-        {desktop && state && !state.cdp ? " · Full CDP requires the desktop bridge" : ""}
+        {desktop && state && !state.cdp ? " · Update Paseo Desktop for full DevTools" : ""}
       </Text>
     </View>
   );

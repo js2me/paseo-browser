@@ -1,6 +1,6 @@
 # Native desktop bridge v1
 
-The bridge is optional for native desktop rendering, DevTools and mobile viewing. Standard Paseo can broadcast main-process screenshots of the same native tab, at up to five requests per second, and send mobile input to it. This bridge adds higher-rate capture and full CDP, including HttpOnly cookie management.
+The native DevTools API is built into the Paseo Desktop source integration. Standard Paseo can broadcast main-process screenshots of the same native tab, at up to five requests per second, and send mobile input to it. This bridge adds higher-rate capture and full CDP, including HttpOnly cookie management.
 
 The plugin owns the native WebView and registers it with Paseo's existing browser registry. The desktop bridge adds three IPC capabilities to the preload browser API:
 
@@ -10,13 +10,13 @@ The plugin owns the native WebView and registers it with Paseo's existing browse
 
 `native-bridge.cjs` is the compiled main-process module. `native-bridge.patch` adds the same implementation and preload/IPC wiring to the Paseo source revision in `base.json`. Paseo source is Apache-2.0 licensed; its original distribution and licenses are retained by the desktop-copy tool.
 
-## Linux desktop copy
+## End-user setup
 
-Run the plugin's `prepare:native-desktop` command with the existing AppDir as source and a new destination. The helper copies the distribution and appends the native module/API wiring to its ASAR, keeping original resources, unpacked modules and executable dependencies. It refuses an existing destination and never writes to the source installation.
+Use a Paseo Desktop release containing the native DevTools API. The plugin detects it automatically; there is no separate bridge installation. This integration is currently prepared in the Paseo source checkout and must be released upstream. Older Desktop builds report an update requirement for CDP-only operations.
 
-For an AppImage currently running, its mounted AppDir is typically `/tmp/.mount_paseo…`. The generated `run-native-paseo` launches the copied distribution. With `DISPLAY` available, it selects X11/XWayland through `PASEO_ELECTRON_FLAGS`, retaining GPU acceleration. Hidden Electron 37 guests can leave CDP capture pending under Wayland. An explicit `PASEO_ELECTRON_FLAGS=--ozone-platform=wayland` overrides this default but may break mobile capture. Close the existing app first: both copies deliberately use the existing Paseo application identity, browser profile and settings. The helper does not launch either app or restart the daemon. A desktop-managed daemon can stop when its desktop quits, so schedule that interruption before switching.
+## Developer overlay
 
-The copy is a custom desktop build. Future upstream updates may not contain this bridge; reapply it or use an upstream release that advertises the same API. When the API is missing, the plugin keeps its native desktop tab and uses standard screenshot capture for mobile viewing. Full CDP tools report the missing bridge separately.
+The `prepare:native-desktop` helper is retained only for development against older Linux AppDirs. It prepares an independent copy and does not modify or restart the running application. It is not a distribution or installation mechanism for plugin users. Test the source integration below before submitting it upstream.
 
 ## Source build
 
