@@ -192,6 +192,11 @@ it("allows event reads and dialog replies while an earlier command waits, retain
   expect(events.operation).toBe("cdp_events");
   exchange(relay, [{ id: events.id, result: { events: [] } }]);
   await reading;
+  const inspecting = relay.command("workspace", "agent", "cdp_send", { method: "Debugger.evaluateOnCallFrame", params: { callFrameId: "frame", expression: "local" } });
+  const inspection = exchange(relay).commands[0];
+  expect(inspection.input.method).toBe("Debugger.evaluateOnCallFrame");
+  exchange(relay, [{ id: inspection.id, result: { result: { value: 42 } } }]);
+  expect(await inspecting).toEqual({ result: { value: 42 } });
   const replying = relay.command("workspace", "agent", "browser_dialog", { accept: false });
   const reply = exchange(relay).commands[0];
   expect(reply.operation).toBe("browser_dialog");

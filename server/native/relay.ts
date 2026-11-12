@@ -27,6 +27,7 @@ type Workspace = {
 const OWNER_TTL = 5_000;
 const VIEWER_TTL = 2_500;
 const CDP_UNBLOCKERS = new Set([
+  "Debugger.evaluateOnCallFrame", "Debugger.getScriptSource", "Runtime.getProperties",
   "Page.handleJavaScriptDialog", "Debugger.resume", "Debugger.stepInto", "Debugger.stepOut",
   "Debugger.stepOver", "Debugger.disable", "Runtime.terminateExecution", "Runtime.runIfWaitingForDebugger",
   "Fetch.continueRequest", "Fetch.continueResponse", "Fetch.fulfillRequest", "Fetch.failRequest",

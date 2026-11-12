@@ -199,8 +199,14 @@ try {
   await call("browser_dialog", { accept: true, promptText: "native reply" });
   assert.equal((await prompted).result.value, true);
   await call("cdp_send", { method: "Debugger.enable" });
-  const paused = call("cdp_send", { method: "Runtime.evaluate", params: { expression: "debugger; 42", returnByValue: true } });
-  await waitForEvent("Debugger.paused");
+  const paused = call("cdp_send", { method: "Runtime.evaluate", params: { expression: "(() => { const local = 42; debugger; return local; })()", returnByValue: true } });
+  const pausedEvent = await waitForEvent("Debugger.paused");
+  const pausedFrame = pausedEvent.params.callFrames[0];
+  const localValue = await call("cdp_send", { method: "Debugger.evaluateOnCallFrame", params: { callFrameId: pausedFrame.callFrameId, expression: "local", returnByValue: true } });
+  assert.equal(localValue.result.value, 42);
+  const scope = pausedFrame.scopeChain.find((item: any) => item.type === "local");
+  const locals = await call("cdp_send", { method: "Runtime.getProperties", params: { objectId: scope.object.objectId } });
+  assert.ok(locals.result.some((item: any) => item.name === "local" && item.value.value === 42));
   await call("cdp_send", { method: "Debugger.resume" });
   assert.equal((await paused).result.value, 42);
   await call("cdp_send", { method: "Debugger.disable" });

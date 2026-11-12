@@ -57,13 +57,26 @@ try {
   assert.equal(await page.evaluate("navigator.onLine"), false);
   await call('browser_network', { action: { kind: 'conditions' } });
   assert.equal(await page.evaluate("navigator.onLine"), true);
-  await cdp.call('cdp_send', { targetId, method: 'Page.enable' });
-  // Dispatch a non-awaited prompt, then answer through the separate CDP connection.
-  const dialog = new Promise<void>(resolve => page.once('dialog', () => resolve()));
-  const reply = page.evaluate("prompt('Question?')");
-  await dialog;
+  // No explicit Page.enable: the cached workspace session must already observe dialogs.
+  const reply = call('cdp_send', { method: 'Runtime.evaluate', params: { expression: "prompt('Question?')", returnByValue: true } });
+  let settled = false;
+  void reply.then(() => { settled = true; });
+  const deadline = Date.now() + 5000;
+  let opening: any;
+  while (!opening && Date.now() < deadline) {
+    const result = await call('cdp_events', { method: 'Page.javascriptDialogOpening' }) as any;
+    opening = result.events[0];
+    if (!opening) await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.ok(opening, 'Page dialog event must be buffered without explicit Page.enable');
+  assert.equal(opening.params.type, 'prompt');
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(settled, false, 'session must leave the dialog open until explicitly answered');
+  // Cookie deletion can complete on the Page-enabled session while Runtime waits.
+  await cdp.call('browser_cookies', { action: 'set', cookies: [{ name: 'dialog_test', value: 'value', url: page.url() }] });
+  await cdp.call('browser_cookies', { action: 'delete', name: 'dialog_test', url: page.url() });
   await call('browser_dialog', { accept: true, promptText: 'answered' });
-  assert.equal(await reply, 'answered');
+  assert.equal((await reply as any).result.value, 'answered');
   await call('browser_emulate', { action: { kind: 'reset' } });
   await call('browser_storage', { area: 'local', action: { kind: 'clear' } });
   assert.deepEqual(await call('browser_storage', { area: 'local', action: { kind: 'get' } }), {});
