@@ -1,3 +1,62 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 285ff8e..89b15d5 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -367,6 +367,10 @@ jobs:
+         if: ${{ runner.os == 'Linux' }}
+         run: npm run test:e2e:renderer --workspace=@getpaseo/desktop
+ 
++      - name: Run desktop startup and background browser E2E
++        if: ${{ runner.os == 'Linux' }}
++        run: xvfb-run -a npm run test:e2e:window-startup --workspace=@getpaseo/desktop
++
+       - name: Run desktop browser E2E
+         if: ${{ runner.os == 'Linux' }}
+         run: npm run test:e2e:browser-tabs --workspace=@getpaseo/desktop
+diff --git a/docs/browser-capture-harness.md b/docs/browser-capture-harness.md
+index f760faf..5969704 100644
+--- a/docs/browser-capture-harness.md
++++ b/docs/browser-capture-harness.md
+@@ -116,8 +116,15 @@ layering inside `overlay-root`. Activating a presented browser also focuses its
+ There is no renderer prep/restore handshake or lifetime background-throttling override.
+ Screenshot capture temporarily enables frame production inside the shared serialized queue,
+ restores the previous throttling policy on success or failure, and retains a 5-second capture budget.
+-The browser tool takes one viewport frame through Electron's frame subscription and releases the
+-subscription on completion or cancellation. A resized resident guest can produce fresh pixels
+-while `capturePage()` leaves its surface-copy request pending; waiting for animation frames or
+-retrying the copy does not repair that state. Full-page screenshots retain the CDP path with layout
+-metrics and screenshot clip.
++Viewport screenshots use CDP with an explicit visual-viewport clip, including its scroll coordinates.
++The clip stays bounded to the viewport while `captureBeyondViewport` lets Chromium render it without
++waiting for another compositor paint. Frame subscriptions can stall on static hidden guests even when
++JavaScript and animation callbacks are running. Full-page screenshots use the same CDP path with the
++page content bounds.
++
++The startup E2E also creates a never-shown window and checks animation callbacks, repeated viewport
++captures, viewport resizing, and scrolled pixel content. Run it with:
++
++```bash
++xvfb-run -a npm run test:e2e:window-startup --workspace=@getpaseo/desktop
++```
+diff --git a/docs/development.md b/docs/development.md
+index ddebf3f..1342cc6 100644
+--- a/docs/development.md
++++ b/docs/development.md
+@@ -341,7 +341,13 @@ it did not start while every process is alive. `showWindowWhenReady`
+ the document finishes loading if the event has not arrived. The fallback is
+ Linux-only; macOS and Windows keep waiting for `ready-to-show`.
+ 
+-Run the startup regression on Linux with an isolated display:
++Desktop selects X11 when an X display is available, including XWayland in a Wayland session.
++Native Wayland can stop producing frames for hidden windows even with background throttling disabled,
++which stalls browser animation callbacks and screenshots. Explicit `--ozone-platform` and
++`--ozone-platform-hint` arguments, including those in `PASEO_ELECTRON_FLAGS`, retain the requested
++backend. A session without an X display keeps Electron's native backend selection.
++
++Run the startup and background-browser regressions on Linux with an isolated display:
+ 
+ ```bash
+ xvfb-run -a npm run test:e2e:window-startup --workspace=@getpaseo/desktop
 diff --git a/packages/app/src/desktop/host.ts b/packages/app/src/desktop/host.ts
 index 2541da9..e9890df 100644
 --- a/packages/app/src/desktop/host.ts
@@ -24,18 +83,477 @@ index 2541da9..e9890df 100644
    setShortcutPolicy?: (input: BrowserKeyboardPolicy) => Promise<void>;
    readonly profilePartition?: string;
    registerAttachedBrowser?: (input: DesktopAttachedBrowserRegistration) => Promise<void>;
+diff --git a/packages/desktop/e2e/window-startup.e2e.mjs b/packages/desktop/e2e/window-startup.e2e.mjs
+index e6654c0..fd7a981 100644
+--- a/packages/desktop/e2e/window-startup.e2e.mjs
++++ b/packages/desktop/e2e/window-startup.e2e.mjs
+@@ -1,11 +1,15 @@
+ import { mkdtemp, rm, writeFile } from "node:fs/promises";
+ import { tmpdir } from "node:os";
+ import path from "node:path";
+-import { fileURLToPath } from "node:url";
++import { fileURLToPath, pathToFileURL } from "node:url";
+ import { _electron as electron, expect } from "playwright/test";
+ 
+ const root = await mkdtemp(path.join(tmpdir(), "paseo-window-startup-"));
+ const modulePath = fileURLToPath(new URL("../dist/window/show-when-ready.js", import.meta.url));
++const graphicsPath = fileURLToPath(new URL("../dist/window/graphics.js", import.meta.url));
++const automationPath = fileURLToPath(
++  new URL("../dist/features/browser-automation/", import.meta.url),
++);
+ 
+ async function launchWindowWithoutHiddenFrames() {
+   const main = path.join(root, "main.cjs");
+@@ -37,11 +41,108 @@ async function expectLoadedDesktopIsShown(desktop) {
+   await expect(page.getByRole("heading", { name: "Desktop ready" })).toBeVisible();
+ }
+ 
++async function launchBackgroundBrowser() {
++  const fixture = path.join(root, "background.html");
++  await writeFile(
++    fixture,
++    '<!doctype html><style>html{scrollbar-width:none}body{margin:0;width:2400px;height:2400px;background:rgb(0,200,0)}</style><h1>Background page</h1><div id="scroll-target" style="position:absolute;left:320px;top:1200px;width:1280px;height:800px"></div>',
++  );
++  const main = path.join(root, "background.cjs");
++  await writeFile(
++    main,
++    `
++    const { app, BrowserWindow, nativeImage } = require("electron");
++    const { configureDesktopGraphics } = require(${JSON.stringify(graphicsPath)});
++    const { adaptWebContents } = require(${JSON.stringify(path.join(automationPath, "ipc.js"))});
++    const { executeAutomationCommand } = require(${JSON.stringify(path.join(automationPath, "service.js"))});
++    configureDesktopGraphics({ argv: process.argv, platform: process.platform, display: process.env.DISPLAY, commandLine: app.commandLine });
++    app.setPath("userData", ${JSON.stringify(path.join(root, "background-profile"))});
++    app.whenReady().then(async () => {
++      const win = global.backgroundWindow = new BrowserWindow({ show: false, webPreferences: { webviewTag: true } });
++      const attached = new Promise(resolve => win.webContents.once("did-attach-webview", (_event, guest) => resolve(guest)));
++      await win.loadURL("data:text/html," + encodeURIComponent(
++        '<div style="position:fixed;left:0;top:0;width:1px;height:1px;overflow:hidden;pointer-events:none">' +
++        '<webview style="display:inline-flex;position:absolute;left:0;top:0;width:1280px;height:800px" src="' +
++        ${JSON.stringify(pathToFileURL(fixture).href)} + '"></webview></div>'
++      ));
++      const guest = await attached;
++      if (guest.isLoading()) await new Promise(resolve => guest.once("did-finish-load", resolve));
++      const tab = adaptWebContents(guest);
++      const registry = {
++        getTabContents: () => tab,
++        listRegisteredBrowserIds: () => ["background"],
++        listRegisteredBrowserIdsForWorkspace: () => ["background"],
++        getBrowserWorkspaceId: () => "workspace",
++        getWorkspaceActiveBrowserId: () => "background",
++      };
++      const run = command => executeAutomationCommand({
++        type: "browser.automation.execute.request", requestId: "background", workspaceId: "workspace", command,
++      }, registry);
++      global.captureBackground = async color => {
++        if (color[0] > 0) await tab.sendDebugCommand("Emulation.setDeviceMetricsOverride", {
++          width: 800, height: 600, deviceScaleFactor: 1, mobile: false,
++        });
++        const evaluated = await run({ command: "evaluate", args: {
++          browserId: "background",
++          function: '() => new Promise(resolve => { const timeout = setTimeout(() => resolve("animation frame stalled"), 2500); requestAnimationFrame(() => { clearTimeout(timeout); document.body.style.background = ' +
++            JSON.stringify('rgb(' + color.join(',') + ')') + '; if (' + color[0] + ' > 0) { document.querySelector("#scroll-target").style.background = document.body.style.background; document.body.style.background = "black"; } scrollTo(' + (color[0] ? 320 : 0) + ',' + (color[0] ? 1200 : 0) + '); resolve(document.querySelector("h1").textContent); }); })',
++        }});
++        const screenshot = await run({ command: "screenshot", args: { browserId: "background", fullPage: false } });
++        if (!evaluated.ok || !screenshot.ok) return { evaluated, screenshot };
++        const image = nativeImage.createFromBuffer(Buffer.from(screenshot.result.dataBase64, "base64"));
++        const size = image.getSize();
++        const offset = (Math.floor(size.height / 2) * size.width + Math.floor(size.width / 2)) * 4;
++        const pixels = image.toBitmap();
++        return {
++          text: JSON.parse(evaluated.result.resultJson),
++          pixel: [pixels[offset + 2], pixels[offset + 1], pixels[offset]],
++          width: size.width,
++          height: size.height,
++          visible: win.isVisible(),
++          throttled: guest.getBackgroundThrottling(),
++        };
++      };
++      global.backgroundReady = true;
++    });
++  `,
++  );
++  const env = Object.fromEntries(
++    Object.entries(process.env).filter(([key]) => key !== "ELECTRON_RUN_AS_NODE"),
++  );
++  return electron.launch({ args: ["--no-sandbox", main], env });
++}
++
++async function expectBackgroundBrowserWorks(desktop) {
++  await expect.poll(() => desktop.evaluate(() => global.backgroundReady)).toBe(true);
++  for (const color of [
++    [0, 200, 0],
++    [0, 0, 200],
++    [200, 0, 0],
++  ]) {
++    const result = await desktop.evaluate(
++      (_electron, requestedColor) => global.captureBackground(requestedColor),
++      color,
++    );
++    expect(result).toEqual({
++      text: "Background page",
++      pixel: color,
++      width: color[0] > 0 ? 800 : 1280,
++      height: color[0] > 0 ? 600 : 800,
++      visible: false,
++      throttled: true,
++    });
++  }
++}
++
+ let desktop;
+ try {
+   desktop = await launchWindowWithoutHiddenFrames();
+   await expectLoadedDesktopIsShown(desktop);
+   console.log("Loaded desktop is visible without hidden compositor frames");
++  await desktop.close();
++  desktop = await launchBackgroundBrowser();
++  await expectBackgroundBrowserWorks(desktop);
++  console.log("Never-shown browser runs animation callbacks and captures fresh pixels repeatedly");
+ } finally {
+   await desktop?.close();
+   await rm(root, { recursive: true, force: true });
+diff --git a/packages/desktop/src/features/browser-automation/ipc.test.ts b/packages/desktop/src/features/browser-automation/ipc.test.ts
+index 427e86e..82178dc 100644
+--- a/packages/desktop/src/features/browser-automation/ipc.test.ts
++++ b/packages/desktop/src/features/browser-automation/ipc.test.ts
+@@ -1,6 +1,6 @@
+ import { describe, expect, test, vi } from "vitest";
+ import { executeAutomationCommand, type BrowserRegistry, type TabImage } from "./service.js";
+-import { adaptWebContents, HostSnapshotEngineRegistry } from "./ipc.js";
++import { adaptWebContents as adaptContents, HostSnapshotEngineRegistry } from "./ipc.js";
+ import type { IsolatedKeyboardInputEvent } from "./trusted-input.js";
+ 
+ class FakeImage implements TabImage {
+@@ -13,6 +13,10 @@ class FakeImage implements TabImage {
+   }
+ }
+ 
++function adaptWebContents(contents: FakeWebContents) {
++  return adaptContents(contents, { decodeImage: () => new FakeImage() });
++}
++
+ class FakeDebugger {
+   public attachedProtocolVersions: string[] = [];
+   public commands: Array<{ command: string; params: Record<string, unknown> }> = [];
+@@ -61,6 +65,9 @@ class FakeDebugger {
+       }
+       return { result: { value: true } };
+     }
++    if (command === "Page.getLayoutMetrics")
++      return { cssVisualViewport: { pageX: 0, pageY: 0, clientWidth: 640, clientHeight: 480 } };
++    if (command === "Page.captureScreenshot") return { data: "iVBORw==" };
+     return { ok: true };
+   }
+ 
+@@ -87,6 +94,7 @@ class FakeDebugger {
+   public emitDetach(): void {
+     this.attachedProtocolVersions.length = 0;
+     this.detachListener?.();
++    for (const finish of this.blockedCommands.splice(0)) finish();
+   }
+ 
+   public finishNextCommand(): void {
+@@ -118,8 +126,6 @@ class FakeWebContents {
+   public readonly debugger = new FakeDebugger();
+   public readonly inputEvents: IsolatedKeyboardInputEvent[] = [];
+   public readonly loadedUrls: string[] = [];
+-  public frameListener: ((image: TabImage) => void) | null = null;
+-  public endedFrameSubscriptions = 0;
+   public readonly invalidations: string[] = [];
+   private consoleMessageListener: ConsoleMessageListener | null = null;
+   public readonly destroyedListeners = new Set<() => void>();
+@@ -172,16 +178,6 @@ class FakeWebContents {
+ 
+   public reload(): void {}
+ 
+-  public beginFrameSubscription(onlyDirty: boolean, callback: (image: TabImage) => void): void {
+-    expect(onlyDirty).toBe(false);
+-    this.frameListener = callback;
+-  }
+-
+-  public endFrameSubscription(): void {
+-    this.frameListener = null;
+-    this.endedFrameSubscriptions += 1;
+-  }
+-
+   public invalidate(): void {
+     this.invalidations.push("invalidate");
+   }
+@@ -222,7 +218,6 @@ class FakeWebContents {
+   public destroy(): void {
+     this.destroyed = true;
+     this.debugger.emitDetach();
+-    this.frameListener = null;
+     for (const listener of this.destroyedListeners) {
+       this.destroyedListeners.delete(listener);
+       listener();
+@@ -255,21 +250,29 @@ describe("browser automation IPC adapter", () => {
+     ]);
+   });
+ 
+-  test("captures one rendered frame and releases the subscription", async () => {
++  test("captures viewport pixels through CDP without waiting for another compositor paint", async () => {
+     const contents = new FakeWebContents(20);
+     const tab = adaptWebContents(contents);
+     const controller = new AbortController();
+     const capture = tab.captureFrame(controller.signal);
+-    contents.frameListener?.(new FakeImage());
+-
+     expect((await capture).getSize()).toEqual({ width: 640, height: 480 });
+-    expect(contents.frameListener).toBeNull();
++    expect(contents.debugger.commands).toEqual([
++      { command: "Page.getLayoutMetrics", params: {} },
++      {
++        command: "Page.captureScreenshot",
++        params: {
++          format: "png",
++          captureBeyondViewport: true,
++          clip: { x: 0, y: 0, width: 640, height: 480, scale: 1 },
++        },
++      },
++    ]);
+     controller.abort();
+-    expect(contents.endedFrameSubscriptions).toBe(1);
+   });
+ 
+-  test("cancels a pending frame subscription when the capture budget expires", async () => {
++  test("cancels a pending capture when its budget expires", async () => {
+     const contents = new FakeWebContents(2001);
++    contents.debugger.blockCommands = true;
+     const tab = adaptWebContents(contents);
+     const controller = new AbortController();
+     const capture = tab.captureFrame(controller.signal);
+@@ -277,14 +280,35 @@ describe("browser automation IPC adapter", () => {
+     controller.abort(new Error("capture deadline"));
+ 
+     await failure;
+-    expect(contents.frameListener).toBeNull();
+-    expect(contents.endedFrameSubscriptions).toBe(1);
++    expect(contents.destroyedListeners.size).toBe(1);
++  });
++
++  test("a cancelled screenshot does not block subsequent CDP commands", async () => {
++    const contents = new FakeWebContents(2004);
++    contents.debugger.blockedCommandNames.add("Page.captureScreenshot");
++    const tab = adaptWebContents(contents);
++    const controller = new AbortController();
++    const captured = tab.captureFrame(controller.signal);
++    await flushMicrotasks();
++    const failure = expect(captured).rejects.toThrow("capture deadline");
++    controller.abort(new Error("capture deadline"));
++    await failure;
++    let completed = false;
++    const next = tab.sendDebugCommand!("Runtime.enable").then((result) => {
++      completed = true;
++      return result;
++    });
++    await flushMicrotasks();
++    expect(completed).toBe(true);
++    contents.debugger.finishNextCommand();
++    await next;
+   });
+ 
+   test("closing a guest settles its screenshot and releases the next queued capture", async () => {
+     vi.useFakeTimers();
+     try {
+       const closing = new FakeWebContents(2002);
++      closing.debugger.blockedCommandNames.add("Page.captureScreenshot");
+       const next = new FakeWebContents(2003);
+       const tabs = new Map([
+         ["closing", adaptWebContents(closing)],
+@@ -313,7 +337,7 @@ describe("browser automation IPC adapter", () => {
+       });
+       const nextCapture = capture("next");
+       await vi.advanceTimersByTimeAsync(0);
+-      expect(closing.frameListener).not.toBeNull();
++      expect(closedResult).toBeUndefined();
+       closing.destroy();
+       await vi.advanceTimersByTimeAsync(0);
+       expect(closedResult).toEqual({
+@@ -326,8 +350,6 @@ describe("browser automation IPC adapter", () => {
+         },
+       });
+       expect(closing.destroyedListeners.size).toBe(0);
+-      expect(next.frameListener).not.toBeNull();
+-      next.frameListener?.(new FakeImage());
+       await expect(nextCapture).resolves.toMatchObject({ ok: true });
+       await closedCapture;
+       expect(next.destroyedListeners.size).toBe(1);
+@@ -371,7 +393,7 @@ describe("browser automation IPC adapter", () => {
+       format: "png",
+     });
+ 
+-    expect(result).toEqual({ ok: true });
++    expect(result).toEqual({ data: "iVBORw==" });
+     expect(contents.debugger.attachedProtocolVersions).toEqual(["1.3"]);
+     expect(contents.debugger.commands).toEqual([
+       { command: "Page.captureScreenshot", params: { format: "png" } },
+@@ -401,7 +423,7 @@ describe("browser automation IPC adapter", () => {
+ 
+     contents.debugger.finishNextCommand();
+     await expect(first).resolves.toEqual({ ok: true });
+-    await expect(second).resolves.toEqual({ ok: true });
++    await expect(second).resolves.toEqual({ data: "iVBORw==" });
+   });
+ 
+   test("handles JavaScript dialogs through the per-tab CDP queue", async () => {
 diff --git a/packages/desktop/src/features/browser-automation/ipc.ts b/packages/desktop/src/features/browser-automation/ipc.ts
-index 18e5b84..a408ed5 100644
+index 18e5b84..5053f59 100644
 --- a/packages/desktop/src/features/browser-automation/ipc.ts
 +++ b/packages/desktop/src/features/browser-automation/ipc.ts
-@@ -1,4 +1,5 @@
+@@ -1,4 +1,7 @@
 -import { ipcMain } from "electron";
 +import { ipcMain, nativeImage } from "electron";
++import { z } from "zod";
++import type { CdpCommandSender } from "./cdp-session-queue.js";
 +import { registerNativeBrowserBridgeIpc } from "./native-bridge.js";
  import { BrowserAutomationExecuteRequestSchema } from "@getpaseo/protocol/browser-automation/rpc-schemas";
  import type {
    BrowserAutomationConsoleLogEntry,
-@@ -450,6 +451,11 @@ function createRegistry(hostWebContentsId: number): BrowserRegistry {
+@@ -105,8 +108,6 @@ interface BrowserAutomationWebContents extends ConsoleMessageEmitter {
+   goBack(): void;
+   goForward(): void;
+   reload(): void;
+-  beginFrameSubscription(onlyDirty: boolean, callback: (image: TabImage) => void): void;
+-  endFrameSubscription(): void;
+   invalidate(): void;
+   getBackgroundThrottling(): boolean;
+   setBackgroundThrottling(allowed: boolean): void;
+@@ -114,11 +115,24 @@ interface BrowserAutomationWebContents extends ConsoleMessageEmitter {
+   insertText(text: string): Promise<void>;
+ }
+ 
+-export function adaptWebContents(contents: BrowserAutomationWebContents): TabContents {
++interface BrowserAutomationAdapters {
++  decodeImage(buffer: Buffer): TabImage;
++}
++
++export function adaptWebContents(
++  contents: BrowserAutomationWebContents,
++  {
++    decodeImage = (buffer) => nativeImage.createFromBuffer(buffer),
++  }: Partial<BrowserAutomationAdapters> = {},
++): TabContents {
+   const contentsId = contents.id;
+   observeConsoleMessages(contents, contentsId);
+   const cdpQueue = getCdpQueue(contentsId);
+   const dialogMonitor = getDialogMonitor(contents, contentsId, cdpQueue);
++  const sendCommand: CdpCommandSender = (command, params) => {
++    if (!contents.debugger.isAttached()) contents.debugger.attach("1.3");
++    return contents.debugger.sendCommand(command, params ?? {});
++  };
+   return {
+     id: contentsId,
+     getURL: () => contents.getURL(),
+@@ -132,7 +146,7 @@ export function adaptWebContents(contents: BrowserAutomationWebContents): TabCon
+     goBack: () => contents.goBack(),
+     goForward: () => contents.goForward(),
+     reload: () => contents.reload(),
+-    captureFrame: (signal) => captureViewportFrame(contents, signal),
++    captureFrame: (signal) => captureViewportFrame({ contents, signal, sendCommand, decodeImage }),
+     invalidate: () => contents.invalidate(),
+     withFrameProduction: async (capture) => {
+       const previous = contents.getBackgroundThrottling();
+@@ -147,26 +161,37 @@ export function adaptWebContents(contents: BrowserAutomationWebContents): TabCon
+     insertText: (text) => contents.insertText(text),
+     getConsoleMessages: () => consoleMessagesByContentsId.get(contentsId) ?? [],
+     captureDialogs: (task) => dialogMonitor.capture(task),
+-    sendDebugCommand: (command: string, params?: Record<string, unknown>) =>
+-      cdpQueue.run(async () => {
+-        if (!contents.debugger.isAttached()) {
+-          contents.debugger.attach("1.3");
+-        }
+-        return contents.debugger.sendCommand(command, params ?? {});
+-      }),
++    sendDebugCommand: (command, params) => cdpQueue.run(() => sendCommand(command, params)),
+   };
+ }
+ 
+-function captureViewportFrame(
+-  contents: BrowserAutomationWebContents,
+-  signal: AbortSignal,
+-): Promise<TabImage> {
++const ViewportMetricsSchema = z.object({
++  cssVisualViewport: z.object({
++    pageX: z.number().finite(),
++    pageY: z.number().finite(),
++    clientWidth: z.number().positive(),
++    clientHeight: z.number().positive(),
++  }),
++});
++const ViewportScreenshotSchema = z.object({ data: z.string().min(1) });
++
++interface ViewportCaptureOptions extends BrowserAutomationAdapters {
++  contents: BrowserAutomationWebContents;
++  signal: AbortSignal;
++  sendCommand: CdpCommandSender;
++}
++
++function captureViewportFrame({
++  contents,
++  signal,
++  sendCommand,
++  decodeImage,
++}: ViewportCaptureOptions): Promise<TabImage> {
+   signal.throwIfAborted();
+   return new Promise((resolve, reject) => {
+     const stop = () => {
+       signal.removeEventListener("abort", abort);
+       contents.removeListener("destroyed", destroyed);
+-      if (!contents.isDestroyed()) contents.endFrameSubscription();
+     };
+     const abort = () => {
+       stop();
+@@ -178,17 +203,37 @@ function captureViewportFrame(
+     };
+     signal.addEventListener("abort", abort, { once: true });
+     contents.once("destroyed", destroyed);
+-    try {
+-      // A resized resident guest can paint while capturePage's surface-copy
+-      // request remains pending. Subscribe to its rendered frames instead.
+-      contents.beginFrameSubscription(false, (image) => {
++    const capture = async () => {
++      const { cssVisualViewport: viewport } = ViewportMetricsSchema.parse(
++        await sendCommand("Page.getLayoutMetrics"),
++      );
++      signal.throwIfAborted();
++      const screenshot = ViewportScreenshotSchema.parse(
++        await sendCommand("Page.captureScreenshot", {
++          format: "png",
++          captureBeyondViewport: true,
++          clip: {
++            x: viewport.pageX,
++            y: viewport.pageY,
++            width: viewport.clientWidth,
++            height: viewport.clientHeight,
++            scale: 1,
++          },
++        }),
++      );
++      signal.throwIfAborted();
++      return decodeImage(Buffer.from(screenshot.data, "base64"));
++    };
++    void capture().then(
++      (image) => {
+         stop();
+-        resolve(image);
+-      });
+-    } catch (error) {
+-      stop();
+-      reject(error);
+-    }
++        return resolve(image);
++      },
++      (error) => {
++        stop();
++        return reject(error);
++      },
++    );
+   });
+ }
+ 
+@@ -450,6 +495,11 @@ function createRegistry(hostWebContentsId: number): BrowserRegistry {
  
  export function registerBrowserAutomationIpc(options?: { ipc?: IpcHandlerRegistry }): void {
    const ipc = options?.ipc ?? ipcMain;
@@ -766,6 +1284,32 @@ index 0000000..ecab97f
 +    return { events, dropped };
 +  });
 +}
+diff --git a/packages/desktop/src/main.ts b/packages/desktop/src/main.ts
+index 072f96a..581168b 100644
+--- a/packages/desktop/src/main.ts
++++ b/packages/desktop/src/main.ts
+@@ -47,6 +47,7 @@ import {
+ } from "./window/window-manager.js";
+ import { setupDarwinCompositorWatchdog } from "./window/compositor-watchdog/index.js";
+ import { showWindowWhenReady } from "./window/show-when-ready.js";
++import { configureDesktopGraphics } from "./window/graphics.js";
+ import { resolveDesktopWindowChromeMode, windowChromeModeArgument } from "./window/chrome.js";
+ import { registerDialogHandlers } from "./features/dialogs.js";
+ import {
+@@ -346,6 +347,13 @@ if (electronFlags) {
+   log.info("[electron-flags]", electronFlags);
+ }
+ 
++configureDesktopGraphics({
++  argv: [...process.argv, ...(electronFlags?.split(/\s+/) ?? [])],
++  platform: process.platform,
++  display: process.env.DISPLAY,
++  commandLine: app.commandLine,
++});
++
+ if (process.platform === "linux") {
+   // Keep the desktop/dock identity independent of the wrapped Electron filename.
+   app.setDesktopName("Paseo.desktop");
 diff --git a/packages/desktop/src/preload.ts b/packages/desktop/src/preload.ts
 index 0942134..2aa3282 100644
 --- a/packages/desktop/src/preload.ts
@@ -793,6 +1337,85 @@ index 0942134..2aa3282 100644
      setShortcutPolicy: (input: BrowserKeyboardPolicy) =>
        ipcRenderer.invoke("paseo:browser:set-shortcut-policy", input),
      profilePartition: PASEO_BROWSER_PROFILE_PARTITION,
+diff --git a/packages/desktop/src/window/graphics.test.ts b/packages/desktop/src/window/graphics.test.ts
+new file mode 100644
+index 0000000..dd8c87e
+--- /dev/null
++++ b/packages/desktop/src/window/graphics.test.ts
+@@ -0,0 +1,43 @@
++import { describe, expect, test } from "vitest";
++import { configureDesktopGraphics } from "./graphics.js";
++
++class CommandLine {
++  constructor(public readonly switches = new Map<string, string>()) {}
++  appendSwitch(name: string, value = "") {
++    this.switches.set(name, value);
++  }
++}
++
++describe("desktop graphics", () => {
++  test("uses XWayland when an X display is available in a Wayland session", () => {
++    const commandLine = new CommandLine(new Map([["ozone-platform", "wayland"]]));
++    configureDesktopGraphics({ argv: [], platform: "linux", display: ":0", commandLine });
++    expect(commandLine.switches).toEqual(new Map([["ozone-platform", "x11"]]));
++  });
++
++  test.each(["ozone-platform", "ozone-platform-hint"])(
++    "preserves an explicit %s selection",
++    (name) => {
++      const commandLine = new CommandLine(new Map([[name, "wayland"]]));
++      configureDesktopGraphics({
++        argv: [`--${name}=wayland`],
++        platform: "linux",
++        display: ":0",
++        commandLine,
++      });
++      expect(commandLine.switches).toEqual(new Map([[name, "wayland"]]));
++    },
++  );
++
++  test.each([undefined, ""])("leaves a session without an X display unchanged (%s)", (display) => {
++    const commandLine = new CommandLine();
++    configureDesktopGraphics({ argv: [], platform: "linux", display, commandLine });
++    expect(commandLine.switches.size).toBe(0);
++  });
++
++  test.each(["darwin", "win32"] as const)("leaves %s unchanged", (platform) => {
++    const commandLine = new CommandLine();
++    configureDesktopGraphics({ argv: [], platform, display: ":0", commandLine });
++    expect(commandLine.switches.size).toBe(0);
++  });
++});
+diff --git a/packages/desktop/src/window/graphics.ts b/packages/desktop/src/window/graphics.ts
+new file mode 100644
+index 0000000..aec4e8b
+--- /dev/null
++++ b/packages/desktop/src/window/graphics.ts
+@@ -0,0 +1,24 @@
++import type { CommandLine } from "electron";
++
++interface DesktopGraphicsOptions {
++  platform: NodeJS.Platform;
++  display: string | undefined;
++  argv: readonly string[];
++  commandLine: Pick<CommandLine, "appendSwitch">;
++}
++
++export function configureDesktopGraphics({
++  platform,
++  display,
++  commandLine,
++  argv,
++}: DesktopGraphicsOptions): void {
++  const hasExplicitBackend = argv.some((argument) =>
++    /^(--ozone-platform|--ozone-platform-hint)(=|$)/.test(argument),
++  );
++  if (platform !== "linux" || !display || hasExplicitBackend) return;
++
++  // Native Wayland stops producing frames for hidden windows, even with
++  // background throttling disabled. XWayland keeps background browser tools usable.
++  commandLine.appendSwitch("ozone-platform", "x11");
++}
 diff --git a/packages/protocol/src/browser-automation/rpc-schemas.test.ts b/packages/protocol/src/browser-automation/rpc-schemas.test.ts
 index a47f248..a811bf5 100644
 --- a/packages/protocol/src/browser-automation/rpc-schemas.test.ts
