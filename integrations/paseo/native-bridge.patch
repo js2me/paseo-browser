@@ -25,47 +25,37 @@ index 2541da9..e9890df 100644
    readonly profilePartition?: string;
    registerAttachedBrowser?: (input: DesktopAttachedBrowserRegistration) => Promise<void>;
 diff --git a/packages/desktop/src/features/browser-automation/ipc.ts b/packages/desktop/src/features/browser-automation/ipc.ts
-index 18e5b84..03e2663 100644
+index 18e5b84..a408ed5 100644
 --- a/packages/desktop/src/features/browser-automation/ipc.ts
 +++ b/packages/desktop/src/features/browser-automation/ipc.ts
 @@ -1,4 +1,5 @@
- import { ipcMain } from "electron";
+-import { ipcMain } from "electron";
++import { ipcMain, nativeImage } from "electron";
 +import { registerNativeBrowserBridgeIpc } from "./native-bridge.js";
  import { BrowserAutomationExecuteRequestSchema } from "@getpaseo/protocol/browser-automation/rpc-schemas";
  import type {
    BrowserAutomationConsoleLogEntry,
-@@ -450,6 +451,7 @@ function createRegistry(hostWebContentsId: number): BrowserRegistry {
+@@ -450,6 +451,11 @@ function createRegistry(hostWebContentsId: number): BrowserRegistry {
  
  export function registerBrowserAutomationIpc(options?: { ipc?: IpcHandlerRegistry }): void {
    const ipc = options?.ipc ?? ipcMain;
-+  registerNativeBrowserBridgeIpc(ipc);
++  registerNativeBrowserBridgeIpc(ipc, {
++    getGuest: getPaseoBrowserWebContentsForHostWindow,
++    getWorkspaceId: getPaseoBrowserWorkspaceId,
++    images: nativeImage,
++  });
  
    ipc.handle("paseo:browser:execute-automation-command", async (event, rawRequest: unknown) => {
      const hostContents = (event as { sender?: HostWebContents }).sender;
 diff --git a/packages/desktop/src/features/browser-automation/native-bridge.test.ts b/packages/desktop/src/features/browser-automation/native-bridge.test.ts
 new file mode 100644
-index 0000000..5a7add6
+index 0000000..dc1ffdd
 --- /dev/null
 +++ b/packages/desktop/src/features/browser-automation/native-bridge.test.ts
-@@ -0,0 +1,275 @@
+@@ -0,0 +1,279 @@
 +import { EventEmitter } from "node:events";
 +import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-+import { registerNativeBrowserBridgeIpc } from "./native-bridge.js";
-+
-+// Electron's IPC transport and WebContents live outside the Node test runner.
-+// Invoke the registered handlers against an instrumented guest to control CDP timing.
-+const registration = vi.hoisted(() => ({
-+  guests: new Map<string, { hostId: number; workspaceId: string; contents: unknown }>(),
-+}));
-+vi.mock("electron", () => ({ ipcMain: {}, nativeImage: {} }));
-+vi.mock("../browser-webviews/index.js", () => ({
-+  getPaseoBrowserWebContentsForHostWindow: (browserId: string, hostId: number) => {
-+    const guest = registration.guests.get(browserId);
-+    return guest?.hostId === hostId ? guest.contents : null;
-+  },
-+  getPaseoBrowserWorkspaceId: (browserId: string) =>
-+    registration.guests.get(browserId)?.workspaceId ?? null,
-+}));
++import { registerNativeBrowserBridgeIpc, type NativeBrowserContents } from "./native-bridge.js";
 +
 +class GuestDebugger extends EventEmitter {
 +  private attached = false;
@@ -78,7 +68,9 @@ index 0000000..5a7add6
 +  public sendCommand = vi.fn(
 +    async (method: string, _params: Record<string, unknown>): Promise<unknown> => {
 +      if (method === "Page.getLayoutMetrics")
-+        return { cssVisualViewport: { clientWidth: 1600, clientHeight: 1200 } };
++        return {
++          cssVisualViewport: { pageX: 320, pageY: 1800, clientWidth: 1600, clientHeight: 1200 },
++        };
 +      if (method === "Page.captureScreenshot")
 +        return { data: Buffer.from("fresh jpeg").toString("base64") };
 +      if (method === "Target.getTargetInfo")
@@ -87,7 +79,7 @@ index 0000000..5a7add6
 +    },
 +  );
 +}
-+class Guest extends EventEmitter {
++class Guest extends EventEmitter implements NativeBrowserContents {
 +  public readonly debugger = new GuestDebugger();
 +  public destroyed = false;
 +  public throttled = true;
@@ -108,17 +100,28 @@ index 0000000..5a7add6
 +function fixture() {
 +  const host = new Guest(1);
 +  const guest = new Guest(2);
-+  registration.guests.set(identity.browserId, {
-+    hostId: host.id,
-+    workspaceId: identity.workspaceId,
-+    contents: guest,
-+  });
 +  const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>();
-+  registerNativeBrowserBridgeIpc({
-+    handle: (channel, handler) => {
-+      handlers.set(channel, handler);
++  registerNativeBrowserBridgeIpc(
++    {
++      handle: (channel, handler) => {
++        handlers.set(channel, handler);
++      },
 +    },
-+  });
++    {
++      getGuest: (browserId, hostId) =>
++        browserId === identity.browserId && hostId === host.id ? guest : null,
++      getWorkspaceId: (browserId) =>
++        browserId === identity.browserId ? identity.workspaceId : null,
++      images: {
++        createFromBuffer() {
++          throw new Error("Unexpected screencast decoding");
++        },
++        createFromBitmap() {
++          throw new Error("Unexpected screencast encoding");
++        },
++      },
++    },
++  );
 +  const call = async (channel: string, input: Record<string, unknown> = {}, sender = host) => {
 +    const handler = handlers.get(`paseo:browser:native-${channel}`);
 +    if (!handler) throw Error("Missing native IPC handler");
@@ -131,7 +134,6 @@ index 0000000..5a7add6
 +  vi.setSystemTime(10000);
 +});
 +afterEach(() => {
-+  registration.guests.clear();
 +  vi.useRealTimers();
 +});
 +
@@ -174,6 +176,13 @@ index 0000000..5a7add6
 +      width: 1280,
 +      height: 960,
 +      capturedAt: 10000,
++    });
++    expect(guest.debugger.sendCommand).toHaveBeenLastCalledWith("Page.captureScreenshot", {
++      format: "jpeg",
++      quality: 65,
++      fromSurface: true,
++      captureBeyondViewport: false,
++      clip: { x: 320, y: 1800, width: 1600, height: 1200, scale: 0.8 },
 +    });
 +    await vi.advanceTimersByTimeAsync(1600);
 +    const next = await call("frame", { notBefore: 11000 });
@@ -309,7 +318,7 @@ index 0000000..5a7add6
 +    const started = Promise.withResolvers<void>();
 +    guest.debugger.sendCommand.mockImplementation(async (method) => {
 +      if (method === "Page.getLayoutMetrics")
-+        return { cssVisualViewport: { clientWidth: 800, clientHeight: 600 } };
++        return { cssVisualViewport: { pageX: 0, pageY: 0, clientWidth: 800, clientHeight: 600 } };
 +      if (method === "Page.captureScreenshot") {
 +        started.resolve();
 +        return screenshot.promise;
@@ -325,21 +334,30 @@ index 0000000..5a7add6
 +});
 diff --git a/packages/desktop/src/features/browser-automation/native-bridge.ts b/packages/desktop/src/features/browser-automation/native-bridge.ts
 new file mode 100644
-index 0000000..c3dc6c5
+index 0000000..ecab97f
 --- /dev/null
 +++ b/packages/desktop/src/features/browser-automation/native-bridge.ts
-@@ -0,0 +1,406 @@
+@@ -0,0 +1,428 @@
 +import {
 +  NativeBrowserFrameRequestSchema,
 +  NativeBrowserCommandRequestSchema,
 +  NativeBrowserEventsRequestSchema,
 +} from "@getpaseo/protocol/browser-native";
-+import { ipcMain, nativeImage, type WebContents } from "electron";
++import type { WebContents, nativeImage } from "electron";
 +import type { NativeBrowserEvent, NativeBrowserFrame } from "@getpaseo/protocol/browser-native";
-+import {
-+  getPaseoBrowserWebContentsForHostWindow,
-+  getPaseoBrowserWorkspaceId,
-+} from "../browser-webviews/index.js";
++
++export interface NativeBrowserContents extends Pick<
++  WebContents,
++  "id" | "isDestroyed" | "getBackgroundThrottling" | "setBackgroundThrottling" | "on" | "once"
++> {
++  debugger: Pick<WebContents["debugger"], "on" | "attach" | "isAttached" | "sendCommand">;
++}
++
++export interface NativeBrowserBridgeDependencies {
++  getGuest(browserId: string, hostId: number): NativeBrowserContents | null;
++  getWorkspaceId(browserId: string): string | null;
++  images: Pick<typeof nativeImage, "createFromBuffer" | "createFromBitmap">;
++}
 +
 +interface Capture {
 +  tail: Promise<unknown>;
@@ -355,14 +373,49 @@ index 0000000..c3dc6c5
 +  lastStillAttemptAt: number;
 +  notBefore: number;
 +  previousThrottling: boolean | null;
-+  host: WebContents | null;
++  host: NativeBrowserContents | null;
 +  stopTimer: ReturnType<typeof setTimeout> | null;
 +}
 +const MAX_EVENTS = 256;
 +const MAX_EVENT_BYTES = 2 * 1024 * 1024;
-+const captures = new WeakMap<WebContents, Capture>();
-+const hostDemand = new WeakMap<WebContents, { guests: Set<WebContents>; previous: boolean }>();
-+function keepHostActive(host: WebContents, guest: WebContents) {
++const contextMethods = new Set([
++  "Browser.grantPermissions",
++  "Browser.resetPermissions",
++  "Browser.setPermission",
++  "Browser.setDownloadBehavior",
++]);
++const cookies: Record<string, string> = {
++  "Storage.getCookies": "Network.getAllCookies",
++  "Storage.setCookies": "Network.setCookies",
++  "Storage.clearCookies": "Network.clearBrowserCookies",
++};
++// A pending Runtime command can wait for a dialog reply or debugger resume.
++// Queueing its unblocker behind it would leave the guest permanently paused.
++const unblockers = new Set([
++  "Page.handleJavaScriptDialog",
++  "Debugger.evaluateOnCallFrame",
++  "Debugger.getScriptSource",
++  "Runtime.getProperties",
++  "Debugger.resume",
++  "Debugger.stepInto",
++  "Debugger.stepOut",
++  "Debugger.stepOver",
++  "Debugger.disable",
++  "Runtime.terminateExecution",
++  "Runtime.runIfWaitingForDebugger",
++  "Fetch.continueRequest",
++  "Fetch.continueResponse",
++  "Fetch.fulfillRequest",
++  "Fetch.failRequest",
++  "Fetch.continueWithAuth",
++  "Fetch.disable",
++]);
++const captures = new WeakMap<NativeBrowserContents, Capture>();
++const hostDemand = new WeakMap<
++  NativeBrowserContents,
++  { guests: Set<NativeBrowserContents>; previous: boolean }
++>();
++function keepHostActive(host: NativeBrowserContents, guest: NativeBrowserContents) {
 +  let demand = hostDemand.get(host);
 +  if (!demand) {
 +    demand = { guests: new Set(), previous: host.getBackgroundThrottling() };
@@ -371,7 +424,7 @@ index 0000000..c3dc6c5
 +  }
 +  demand.guests.add(guest);
 +}
-+function releaseHost(capture: Capture, guest: WebContents) {
++function releaseHost(capture: Capture, guest: NativeBrowserContents) {
 +  const host = capture.host;
 +  if (!host) return;
 +  capture.host = null;
@@ -384,7 +437,7 @@ index 0000000..c3dc6c5
 +  }
 +}
 +
-+function observe(contents: WebContents): Capture {
++function observe(contents: NativeBrowserContents): Capture {
 +  const existing = captures.get(contents);
 +  if (existing) return existing;
 +  const capture: Capture = {
@@ -476,27 +529,20 @@ index 0000000..c3dc6c5
 +  return capture;
 +}
 +
-+function resolveGuest(sender: WebContents, input: Record<string, unknown>): WebContents {
-+  if (typeof input.browserId !== "string" || typeof input.workspaceId !== "string") {
-+    throw new Error("Native browser and workspace IDs are required");
-+  }
-+  const contents = getPaseoBrowserWebContentsForHostWindow(input.browserId, sender.id);
-+  if (!contents || getPaseoBrowserWorkspaceId(input.browserId) !== input.workspaceId) {
-+    throw new Error("Native browser does not belong to this host window and workspace");
-+  }
-+  return contents;
-+}
-+
 +interface NativeIpcRegistry {
 +  handle(channel: string, listener: (event: unknown, ...args: unknown[]) => unknown): void;
 +}
-+function hostSender(event: unknown): WebContents {
-+  const contents = (event as { sender?: WebContents })?.sender;
++function hostSender(event: unknown): NativeBrowserContents {
++  const contents = (event as { sender?: NativeBrowserContents })?.sender;
 +  if (!contents || typeof contents.id !== "number")
 +    throw new Error("Native CDP requires a host window");
 +  return contents;
 +}
-+function consumeNativeFrame(contents: WebContents, capture: Capture): void {
++function consumeNativeFrame(
++  contents: NativeBrowserContents,
++  capture: Capture,
++  images: NativeBrowserBridgeDependencies["images"],
++): void {
 +  const rawFrame = capture.rawFrame;
 +  capture.rawFrame = null;
 +  for (const sessionId of capture.acknowledgements)
@@ -507,7 +553,7 @@ index 0000000..c3dc6c5
 +    typeof rawFrame.metadata.timestamp === "number" &&
 +    rawFrame.metadata.timestamp * 1000 > capture.notBefore
 +  ) {
-+    const image = nativeImage.createFromBuffer(Buffer.from(rawFrame.data, "base64"));
++    const image = images.createFromBuffer(Buffer.from(rawFrame.data, "base64"));
 +    const dimensions = image.getSize();
 +    if (
 +      dimensions.width > 0 &&
@@ -527,7 +573,7 @@ index 0000000..c3dc6c5
 +        pixels[index + 2] = Math.min(255, pixels[index + 2]! + white);
 +        pixels[index + 3] = 255;
 +      }
-+      const data = nativeImage.createFromBitmap(pixels, dimensions).toJPEG(65).toString("base64");
++      const data = images.createFromBitmap(pixels, dimensions).toJPEG(65).toString("base64");
 +      if (data.length <= 1_099_900)
 +        capture.frame = {
 +          data: "data:image/jpeg;base64," + data,
@@ -538,14 +584,17 @@ index 0000000..c3dc6c5
 +  }
 +}
 +
-+async function captureStillFrame(contents: WebContents, capture: Capture): Promise<void> {
++async function captureStillFrame(contents: NativeBrowserContents, capture: Capture): Promise<void> {
 +  const generation = capture.generation;
 +  const capturedAt = Date.now();
 +  const metrics = await contents.debugger.sendCommand("Page.getLayoutMetrics");
-+  const viewport = metrics.cssVisualViewport;
-+  const width = viewport.clientWidth;
-+  const height = viewport.clientHeight;
-+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0)
++  const {
++    pageX: x,
++    pageY: y,
++    clientWidth: width,
++    clientHeight: height,
++  } = metrics.cssVisualViewport;
++  if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0)
 +    throw new Error("Native guest viewport is unavailable");
 +  const scale = Math.min(1, 1280 / width, 960 / height);
 +  const result = await contents.debugger.sendCommand("Page.captureScreenshot", {
@@ -553,7 +602,7 @@ index 0000000..c3dc6c5
 +    quality: 65,
 +    fromSurface: true,
 +    captureBeyondViewport: false,
-+    clip: { x: 0, y: 0, width, height, scale },
++    clip: { x, y, width, height, scale },
 +  });
 +  if (contents.isDestroyed() || capture.generation !== generation) return;
 +  if (
@@ -570,7 +619,21 @@ index 0000000..c3dc6c5
 +  };
 +}
 +
-+export function registerNativeBrowserBridgeIpc(ipc: NativeIpcRegistry = ipcMain): void {
++export function registerNativeBrowserBridgeIpc(
++  ipc: NativeIpcRegistry,
++  dependencies: NativeBrowserBridgeDependencies,
++): void {
++  function resolveGuest(
++    sender: NativeBrowserContents,
++    input: { browserId: string; workspaceId: string },
++  ): NativeBrowserContents {
++    const contents = dependencies.getGuest(input.browserId, sender.id);
++    if (!contents || dependencies.getWorkspaceId(input.browserId) !== input.workspaceId) {
++      throw new Error("Native browser does not belong to this host window and workspace");
++    }
++    return contents;
++  }
++
 +  ipc.handle("paseo:browser:native-frame", async (event, raw: unknown) => {
 +    const input = NativeBrowserFrameRequestSchema.parse(raw);
 +    const contents = resolveGuest(hostSender(event), input);
@@ -602,7 +665,7 @@ index 0000000..c3dc6c5
 +        throw error;
 +      }
 +    }
-+    consumeNativeFrame(contents, capture);
++    consumeNativeFrame(contents, capture, dependencies.images);
 +    if (capture.stopTimer) clearTimeout(capture.stopTimer);
 +    capture.stopTimer = setTimeout(() => {
 +      if (!contents.isDestroyed())
@@ -641,12 +704,6 @@ index 0000000..c3dc6c5
 +    const input = NativeBrowserCommandRequestSchema.parse(raw);
 +    const contents = resolveGuest(hostSender(event), input);
 +    const method = input.method;
-+    const contextMethods = new Set([
-+      "Browser.grantPermissions",
-+      "Browser.resetPermissions",
-+      "Browser.setPermission",
-+      "Browser.setDownloadBehavior",
-+    ]);
 +    if (
 +      method.startsWith("Browser.") &&
 +      method !== "Browser.getVersion" &&
@@ -676,11 +733,6 @@ index 0000000..c3dc6c5
 +        return method === "Target.getTargets" ? { targetInfos: [own.targetInfo] } : own;
 +      }
 +
-+      const cookies: Record<string, string> = {
-+        "Storage.getCookies": "Network.getAllCookies",
-+        "Storage.setCookies": "Network.setCookies",
-+        "Storage.clearCookies": "Network.clearBrowserCookies",
-+      };
 +      if (cookies[method]) return contents.debugger.sendCommand(cookies[method], params);
 +      if (contextMethods.has(method)) {
 +        const own = await contents.debugger.sendCommand("Target.getTargetInfo");
@@ -693,27 +745,6 @@ index 0000000..c3dc6c5
 +      }
 +      return contents.debugger.sendCommand(method, params);
 +    };
-+    // A pending Runtime command can wait for a dialog reply or debugger resume.
-+    // Queueing its unblocker behind it would leave the guest permanently paused.
-+    const unblockers = new Set([
-+      "Page.handleJavaScriptDialog",
-+      "Debugger.evaluateOnCallFrame",
-+      "Debugger.getScriptSource",
-+      "Runtime.getProperties",
-+      "Debugger.resume",
-+      "Debugger.stepInto",
-+      "Debugger.stepOut",
-+      "Debugger.stepOver",
-+      "Debugger.disable",
-+      "Runtime.terminateExecution",
-+      "Runtime.runIfWaitingForDebugger",
-+      "Fetch.continueRequest",
-+      "Fetch.continueResponse",
-+      "Fetch.fulfillRequest",
-+      "Fetch.failRequest",
-+      "Fetch.continueWithAuth",
-+      "Fetch.disable",
-+    ]);
 +    if (unblockers.has(method)) return execute();
 +    const pending = capture.tail.then(execute);
 +    capture.tail = pending.catch(() => undefined);
@@ -762,6 +793,53 @@ index 0942134..2aa3282 100644
      setShortcutPolicy: (input: BrowserKeyboardPolicy) =>
        ipcRenderer.invoke("paseo:browser:set-shortcut-policy", input),
      profilePartition: PASEO_BROWSER_PROFILE_PARTITION,
+diff --git a/packages/protocol/src/browser-automation/rpc-schemas.test.ts b/packages/protocol/src/browser-automation/rpc-schemas.test.ts
+index a47f248..a811bf5 100644
+--- a/packages/protocol/src/browser-automation/rpc-schemas.test.ts
++++ b/packages/protocol/src/browser-automation/rpc-schemas.test.ts
+@@ -1,3 +1,8 @@
++import {
++  NativeBrowserCommandRequestSchema,
++  NativeBrowserFrameRequestSchema,
++  NativeBrowserEventsRequestSchema,
++} from "../browser-native.js";
+ import { describe, expect, test } from "vitest";
+ 
+ import {
+@@ -819,3 +824,33 @@ describe("browser automation execute RPC schemas", () => {
+     });
+   });
+ });
++
++describe("native Desktop DevTools IPC requests", () => {
++  const guest = { browserId: BROWSER_ID, workspaceId: "workspace" };
++  test("accepts arbitrary guest CDP domains without narrowing to an automation command list", () => {
++    const input = { ...guest, method: "CSS.getMatchedStylesForNode", params: { nodeId: 12 } };
++    expect(NativeBrowserCommandRequestSchema.parse(input)).toEqual(input);
++  });
++  test("rejects missing guest identity and malformed protocol methods at the IPC boundary", () => {
++    expect(NativeBrowserCommandRequestSchema.safeParse({ method: "DOM.getDocument" }).success).toBe(
++      false,
++    );
++    expect(
++      NativeBrowserCommandRequestSchema.safeParse({ ...guest, method: "not a command" }).success,
++    ).toBe(false);
++    expect(
++      NativeBrowserCommandRequestSchema.safeParse({
++        ...guest,
++        method: "DOM.getDocument",
++        params: [],
++      }).success,
++    ).toBe(false);
++  });
++  test("validates frame freshness and preserves non-destructive event reads", () => {
++    expect(NativeBrowserFrameRequestSchema.safeParse({ ...guest, notBefore: -1 }).success).toBe(
++      false,
++    );
++    const input = { ...guest, method: "Debugger.paused", clear: false };
++    expect(NativeBrowserEventsRequestSchema.parse(input)).toEqual(input);
++  });
++});
 diff --git a/packages/protocol/src/browser-native.ts b/packages/protocol/src/browser-native.ts
 new file mode 100644
 index 0000000..8c1f060
@@ -806,3 +884,30 @@ index 0000000..8c1f060
 +  events: NativeBrowserEvent[];
 +  dropped: number;
 +}
+diff --git a/public-docs/browser-tools.md b/public-docs/browser-tools.md
+index f1d586d..3b7b5a1 100644
+--- a/public-docs/browser-tools.md
++++ b/public-docs/browser-tools.md
+@@ -76,3 +76,22 @@ Tools return structured errors rather than failing silently. The ones agents see
+ | `browser_stale_ref` | The ref no longer matches the page — take a new snapshot.                       |
+ | `browser_timeout`   | The element never became actionable, or the wait condition never held.          |
+ | `browser_denied`    | The action isn't allowed — e.g. a non-`http(s)` URL, or no history to navigate. |
++
++## Native Desktop DevTools API
++
++Paseo Desktop exposes `paseoDesktop.browser.nativeBridgeVersion` (`1`) with
++`sendNativeCommand`, `readNativeEvents` and `captureNativeFrame`. Browser plugins detect
++this API on the connected Desktop; users do not install a separate bridge or patch the app.
++Older Desktop builds need an update containing this API for full native CDP access.
++
++Requests include `browserId` and `workspaceId`. Desktop resolves the registered guest for
++the calling host window and workspace before sending any command. DOM, CSS, Runtime,
++Network, Accessibility, Debugger and profiling domains operate on that guest. Browser
++shutdown and target lifecycle commands are excluded; use the normal browser tab APIs.
++Cookie operations and permission/download settings use the guest's browser context.
++
++Enable a CDP domain before reading its events. The event buffer is bounded by count and
++bytes and reports a dropped-event counter; consumers should drain it promptly. Dialog
++responses, paused-frame/object inspection and debugger resume/step commands can run while
++a previous command waits for JavaScript to continue. Quiet pages use bounded still captures
++when the screencast has no fresh paint. Finish intercepted requests and resume execution after debugging.
