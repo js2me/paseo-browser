@@ -39,24 +39,40 @@ index f760faf..5969704 100644
 +xvfb-run -a npm run test:e2e:window-startup --workspace=@getpaseo/desktop
 +```
 diff --git a/docs/development.md b/docs/development.md
-index ddebf3f..1342cc6 100644
+index ddebf3f..3b7db0b 100644
 --- a/docs/development.md
 +++ b/docs/development.md
-@@ -341,7 +341,13 @@ it did not start while every process is alive. `showWindowWhenReady`
+@@ -341,7 +341,15 @@ it did not start while every process is alive. `showWindowWhenReady`
  the document finishes loading if the event has not arrived. The fallback is
  Linux-only; macOS and Windows keep waiting for `ready-to-show`.
  
 -Run the startup regression on Linux with an isolated display:
-+Desktop selects X11 when an X display is available, including XWayland in a Wayland session.
-+Native Wayland can stop producing frames for hidden windows even with background throttling disabled,
++The packaged Linux launcher selects X11 before starting Electron when an X display is available,
++including XWayland in a Wayland session. Switching Ozone from JavaScript is too late: it can leave
++native windows and GPU subprocesses using different backends. Native Wayland can stop producing frames for hidden windows even with background throttling disabled,
 +which stalls browser animation callbacks and screenshots. Explicit `--ozone-platform` and
 +`--ozone-platform-hint` arguments, including those in `PASEO_ELECTRON_FLAGS`, retain the requested
-+backend. A session without an X display keeps Electron's native backend selection.
++backend. The launcher forwards environment backend arguments onto argv before initialization; the
++CLI passthrough parser excludes these graphics arguments from CLI commands. A session without an X display keeps Electron's native backend selection.
 +
 +Run the startup and background-browser regressions on Linux with an isolated display:
  
  ```bash
  xvfb-run -a npm run test:e2e:window-startup --workspace=@getpaseo/desktop
+diff --git a/docs/testing.md b/docs/testing.md
+index afe7cea..375c88f 100644
+--- a/docs/testing.md
++++ b/docs/testing.md
+@@ -119,6 +119,9 @@ The Desktop Packages workflow runs the Linux x64 smoke under Xvfb on main pushes
+ Never repair `chrome-sandbox` in the smoke harness. The old unpacked smoke set its mode to 4755 and concealed a broken package installer. Run installer tests as root and launch tests as an ordinary user: a root-run namespace probe does not reproduce Ubuntu's AppArmor policy for desktop users. Preserve both restricted and unrestricted cases; either one alone permits another sandbox regression.
+ 
+ Smoke jobs upload renderer screenshots and desktop/daemon diagnostics, including successful Linux sandbox evidence.
++On a Linux workstation, set `PASEO_DESKTOP_SMOKE_USE_EXISTING_DISPLAY=1` to exercise the real desktop
++session instead of Xvfb. Use an isolated profile as the harness normally does; an Xvfb-only pass does
++not cover native Wayland/XWayland startup.
+ 
+ To exercise the smoke locally on Linux:
+ 
 diff --git a/packages/app/src/desktop/host.ts b/packages/app/src/desktop/host.ts
 index 2541da9..e9890df 100644
 --- a/packages/app/src/desktop/host.ts
@@ -83,11 +99,27 @@ index 2541da9..e9890df 100644
    setShortcutPolicy?: (input: BrowserKeyboardPolicy) => Promise<void>;
    readonly profilePartition?: string;
    registerAttachedBrowser?: (input: DesktopAttachedBrowserRegistration) => Promise<void>;
+diff --git a/packages/desktop/e2e/packaged-app-smoke.js b/packages/desktop/e2e/packaged-app-smoke.js
+index 1d0cfeb..701ca24 100644
+--- a/packages/desktop/e2e/packaged-app-smoke.js
++++ b/packages/desktop/e2e/packaged-app-smoke.js
+@@ -94,7 +94,10 @@ function getMacMainExecutablePath(appPath) {
+ }
+ 
+ function getLaunchCommand(executablePath, args) {
+-  if (process.platform !== "linux") {
++  if (
++    process.platform !== "linux" ||
++    process.env.PASEO_DESKTOP_SMOKE_USE_EXISTING_DISPLAY === "1"
++  ) {
+     return {
+       command: executablePath,
+       args,
 diff --git a/packages/desktop/e2e/window-startup.e2e.mjs b/packages/desktop/e2e/window-startup.e2e.mjs
-index e6654c0..fd7a981 100644
+index e6654c0..08fd7fa 100644
 --- a/packages/desktop/e2e/window-startup.e2e.mjs
 +++ b/packages/desktop/e2e/window-startup.e2e.mjs
-@@ -1,11 +1,15 @@
+@@ -1,11 +1,14 @@
  import { mkdtemp, rm, writeFile } from "node:fs/promises";
  import { tmpdir } from "node:os";
  import path from "node:path";
@@ -97,14 +129,13 @@ index e6654c0..fd7a981 100644
  
  const root = await mkdtemp(path.join(tmpdir(), "paseo-window-startup-"));
  const modulePath = fileURLToPath(new URL("../dist/window/show-when-ready.js", import.meta.url));
-+const graphicsPath = fileURLToPath(new URL("../dist/window/graphics.js", import.meta.url));
 +const automationPath = fileURLToPath(
 +  new URL("../dist/features/browser-automation/", import.meta.url),
 +);
  
  async function launchWindowWithoutHiddenFrames() {
    const main = path.join(root, "main.cjs");
-@@ -37,11 +41,108 @@ async function expectLoadedDesktopIsShown(desktop) {
+@@ -37,11 +40,108 @@ async function expectLoadedDesktopIsShown(desktop) {
    await expect(page.getByRole("heading", { name: "Desktop ready" })).toBeVisible();
  }
  
@@ -119,10 +150,8 @@ index e6654c0..fd7a981 100644
 +    main,
 +    `
 +    const { app, BrowserWindow, nativeImage } = require("electron");
-+    const { configureDesktopGraphics } = require(${JSON.stringify(graphicsPath)});
 +    const { adaptWebContents } = require(${JSON.stringify(path.join(automationPath, "ipc.js"))});
 +    const { executeAutomationCommand } = require(${JSON.stringify(path.join(automationPath, "service.js"))});
-+    configureDesktopGraphics({ argv: process.argv, platform: process.platform, display: process.env.DISPLAY, commandLine: app.commandLine });
 +    app.setPath("userData", ${JSON.stringify(path.join(root, "background-profile"))});
 +    app.whenReady().then(async () => {
 +      const win = global.backgroundWindow = new BrowserWindow({ show: false, webPreferences: { webviewTag: true } });
@@ -176,7 +205,9 @@ index e6654c0..fd7a981 100644
 +  const env = Object.fromEntries(
 +    Object.entries(process.env).filter(([key]) => key !== "ELECTRON_RUN_AS_NODE"),
 +  );
-+  return electron.launch({ args: ["--no-sandbox", main], env });
++  const displayArgs =
++    process.platform === "linux" && process.env.DISPLAY ? ["--ozone-platform=x11"] : [];
++  return electron.launch({ args: ["--no-sandbox", ...displayArgs, main], env });
 +}
 +
 +async function expectBackgroundBrowserWorks(desktop) {
@@ -213,6 +244,156 @@ index e6654c0..fd7a981 100644
  } finally {
    await desktop?.close();
    await rm(root, { recursive: true, force: true });
+diff --git a/packages/desktop/scripts/linux-sandbox/launcher.sh b/packages/desktop/scripts/linux-sandbox/launcher.sh
+index 8f0b6a6..a45fba2 100644
+--- a/packages/desktop/scripts/linux-sandbox/launcher.sh
++++ b/packages/desktop/scripts/linux-sandbox/launcher.sh
+@@ -10,6 +10,26 @@ if [ "${ELECTRON_RUN_AS_NODE:-}" = 1 ]; then
+   exec "$executable" "$@"
+ fi
+ 
++# Ozone must be selected before Electron initializes the windowing system.
++set -f
++backend_requested=false
++for arg in "$@"; do
++  case "$arg" in
++    --ozone-platform|--ozone-platform=*|--ozone-platform-hint|--ozone-platform-hint=*) backend_requested=true ;;
++  esac
++done
++for flag in ${PASEO_ELECTRON_FLAGS:-}; do
++  case "$flag" in
++    --ozone-platform=*|--ozone-platform-hint=*)
++      set -- "$@" "$flag"
++      backend_requested=true
++      ;;
++  esac
++done
++if [ -n "${DISPLAY:-}" ] && [ "$backend_requested" = false ]; then
++  set -- --ozone-platform=x11 "$@"
++fi
++
+ for arg in "$@"; do
+   if [ "$arg" = '--no-sandbox' ]; then
+     export PASEO_DESKTOP_SANDBOX_REASON='requested by --no-sandbox'
+@@ -19,7 +39,6 @@ for arg in "$@"; do
+ done
+ 
+ # Match main's whitespace-separated debugging flags without evaluating shell code.
+-set -f
+ for flag in ${PASEO_ELECTRON_FLAGS:-}; do
+   if [ "$flag" = '--no-sandbox' ]; then
+     export PASEO_DESKTOP_SANDBOX_REASON='requested by PASEO_ELECTRON_FLAGS'
+diff --git a/packages/desktop/src/daemon/cli/passthrough.test.ts b/packages/desktop/src/daemon/cli/passthrough.test.ts
+index e891f71..6c34cf1 100644
+--- a/packages/desktop/src/daemon/cli/passthrough.test.ts
++++ b/packages/desktop/src/daemon/cli/passthrough.test.ts
+@@ -35,6 +35,27 @@ describe("passthrough CLI", () => {
+     ).toBeNull();
+   });
+ 
++  it.each([
++    ["--ozone-platform=x11"],
++    ["--ozone-platform", "wayland"],
++    ["--ozone-platform-hint=auto"],
++  ])("keeps graphics arguments out of CLI passthrough (%s)", (...args) => {
++    expect(
++      parsePassthroughCliArgs({
++        argv: ["/usr/bin/Paseo", ...args],
++        isDefaultApp: false,
++        forceCli: false,
++      }),
++    ).toBeNull();
++    expect(
++      parsePassthroughCliArgs({
++        argv: ["/usr/bin/Paseo", ...args, "daemon", "status"],
++        isDefaultApp: false,
++        forceCli: false,
++      }),
++    ).toEqual(["daemon", "status"]);
++  });
++
+   it("ignores macOS GUI launch arguments", () => {
+     expect(
+       parsePassthroughCliArgs({
+diff --git a/packages/desktop/src/daemon/cli/passthrough.ts b/packages/desktop/src/daemon/cli/passthrough.ts
+index a315601..c9778e2 100644
+--- a/packages/desktop/src/daemon/cli/passthrough.ts
++++ b/packages/desktop/src/daemon/cli/passthrough.ts
+@@ -2,7 +2,15 @@ import { pathToFileURL } from "node:url";
+ import { resolvePassthroughCliEntrypoint } from "./entrypoints.js";
+ 
+ const DESKTOP_CLI_ENV = "PASEO_DESKTOP_CLI";
+-const IGNORED_ARG_PREFIXES = ["-psn_", "--class=", "--no-sandbox", "--remote-debugging-port="];
++const IGNORED_ARG_PREFIXES = [
++  "-psn_",
++  "--class=",
++  "--no-sandbox",
++  "--remote-debugging-port=",
++  "--ozone-platform=",
++  "--ozone-platform-hint=",
++];
++const BACKEND_SWITCHES = new Set(["--ozone-platform", "--ozone-platform-hint"]);
+ 
+ export type PassthroughCliRunner = (argv: string[]) => Promise<number>;
+ 
+@@ -14,7 +22,12 @@ export function parsePassthroughCliArgs(input: {
+   const startIndex = input.isDefaultApp ? 2 : 1;
+   const effective: string[] = [];
+ 
+-  for (const arg of input.argv.slice(startIndex)) {
++  for (let index = startIndex; index < input.argv.length; index++) {
++    const arg = input.argv[index]!;
++    if (BACKEND_SWITCHES.has(arg)) {
++      index++;
++      continue;
++    }
+     if (IGNORED_ARG_PREFIXES.some((prefix) => arg.startsWith(prefix))) {
+       continue;
+     }
+diff --git a/packages/desktop/src/daemon/linux-launcher.posix.test.ts b/packages/desktop/src/daemon/linux-launcher.posix.test.ts
+index ba7a8ec..284739e 100644
+--- a/packages/desktop/src/daemon/linux-launcher.posix.test.ts
++++ b/packages/desktop/src/daemon/linux-launcher.posix.test.ts
+@@ -55,6 +55,8 @@ async function launch(
+       env: {
+         ...process.env,
+         FORCE_COLOR: undefined,
++        DISPLAY: undefined,
++        PASEO_ELECTRON_FLAGS: undefined,
+         PATH: `${commands}:${process.env.PATH}`,
+         APPIMAGE: "/tmp/Paseo.AppImage",
+         PASEO_DESKTOP_SMOKE: "0",
+@@ -121,3 +123,30 @@ it("applies a debugging environment sandbox override before Chromium starts", as
+   expect(result.args).toEqual(["--no-sandbox", ...result.input]);
+   expect(result.stderr).toContain("requested by PASEO_ELECTRON_FLAGS");
+ });
++
++it("selects X11 before Electron starts when an X display is available", async () => {
++  const result = await launch({ namespaces: true, env: { DISPLAY: ":0" } });
++  expect(result.args).toEqual(["--ozone-platform=x11", ...result.input]);
++});
++
++it.each([
++  ["--ozone-platform=wayland"],
++  ["--ozone-platform", "wayland"],
++  ["--ozone-platform-hint=auto"],
++])("preserves an explicit backend argument %s", async (...args) => {
++  const result = await launch({ namespaces: true, args, env: { DISPLAY: ":0" } });
++  expect(result.args).toEqual(args);
++});
++
++it("passes an environment backend override to Electron on argv", async () => {
++  const result = await launch({
++    namespaces: true,
++    env: { DISPLAY: ":0", PASEO_ELECTRON_FLAGS: "--ozone-platform=wayland" },
++  });
++  expect(result.args).toEqual([...result.input, "--ozone-platform=wayland"]);
++});
++
++it("does not add graphics flags to Node entrypoints with an X display", async () => {
++  const result = await launch({ env: { DISPLAY: ":0", ELECTRON_RUN_AS_NODE: "1" } });
++  expect(result.args).toEqual(result.input);
++});
 diff --git a/packages/desktop/src/features/browser-automation/ipc.test.ts b/packages/desktop/src/features/browser-automation/ipc.test.ts
 index 427e86e..82178dc 100644
 --- a/packages/desktop/src/features/browser-automation/ipc.test.ts
@@ -1284,32 +1465,6 @@ index 0000000..ecab97f
 +    return { events, dropped };
 +  });
 +}
-diff --git a/packages/desktop/src/main.ts b/packages/desktop/src/main.ts
-index 072f96a..581168b 100644
---- a/packages/desktop/src/main.ts
-+++ b/packages/desktop/src/main.ts
-@@ -47,6 +47,7 @@ import {
- } from "./window/window-manager.js";
- import { setupDarwinCompositorWatchdog } from "./window/compositor-watchdog/index.js";
- import { showWindowWhenReady } from "./window/show-when-ready.js";
-+import { configureDesktopGraphics } from "./window/graphics.js";
- import { resolveDesktopWindowChromeMode, windowChromeModeArgument } from "./window/chrome.js";
- import { registerDialogHandlers } from "./features/dialogs.js";
- import {
-@@ -346,6 +347,13 @@ if (electronFlags) {
-   log.info("[electron-flags]", electronFlags);
- }
- 
-+configureDesktopGraphics({
-+  argv: [...process.argv, ...(electronFlags?.split(/\s+/) ?? [])],
-+  platform: process.platform,
-+  display: process.env.DISPLAY,
-+  commandLine: app.commandLine,
-+});
-+
- if (process.platform === "linux") {
-   // Keep the desktop/dock identity independent of the wrapped Electron filename.
-   app.setDesktopName("Paseo.desktop");
 diff --git a/packages/desktop/src/preload.ts b/packages/desktop/src/preload.ts
 index 0942134..2aa3282 100644
 --- a/packages/desktop/src/preload.ts
@@ -1337,85 +1492,6 @@ index 0942134..2aa3282 100644
      setShortcutPolicy: (input: BrowserKeyboardPolicy) =>
        ipcRenderer.invoke("paseo:browser:set-shortcut-policy", input),
      profilePartition: PASEO_BROWSER_PROFILE_PARTITION,
-diff --git a/packages/desktop/src/window/graphics.test.ts b/packages/desktop/src/window/graphics.test.ts
-new file mode 100644
-index 0000000..dd8c87e
---- /dev/null
-+++ b/packages/desktop/src/window/graphics.test.ts
-@@ -0,0 +1,43 @@
-+import { describe, expect, test } from "vitest";
-+import { configureDesktopGraphics } from "./graphics.js";
-+
-+class CommandLine {
-+  constructor(public readonly switches = new Map<string, string>()) {}
-+  appendSwitch(name: string, value = "") {
-+    this.switches.set(name, value);
-+  }
-+}
-+
-+describe("desktop graphics", () => {
-+  test("uses XWayland when an X display is available in a Wayland session", () => {
-+    const commandLine = new CommandLine(new Map([["ozone-platform", "wayland"]]));
-+    configureDesktopGraphics({ argv: [], platform: "linux", display: ":0", commandLine });
-+    expect(commandLine.switches).toEqual(new Map([["ozone-platform", "x11"]]));
-+  });
-+
-+  test.each(["ozone-platform", "ozone-platform-hint"])(
-+    "preserves an explicit %s selection",
-+    (name) => {
-+      const commandLine = new CommandLine(new Map([[name, "wayland"]]));
-+      configureDesktopGraphics({
-+        argv: [`--${name}=wayland`],
-+        platform: "linux",
-+        display: ":0",
-+        commandLine,
-+      });
-+      expect(commandLine.switches).toEqual(new Map([[name, "wayland"]]));
-+    },
-+  );
-+
-+  test.each([undefined, ""])("leaves a session without an X display unchanged (%s)", (display) => {
-+    const commandLine = new CommandLine();
-+    configureDesktopGraphics({ argv: [], platform: "linux", display, commandLine });
-+    expect(commandLine.switches.size).toBe(0);
-+  });
-+
-+  test.each(["darwin", "win32"] as const)("leaves %s unchanged", (platform) => {
-+    const commandLine = new CommandLine();
-+    configureDesktopGraphics({ argv: [], platform, display: ":0", commandLine });
-+    expect(commandLine.switches.size).toBe(0);
-+  });
-+});
-diff --git a/packages/desktop/src/window/graphics.ts b/packages/desktop/src/window/graphics.ts
-new file mode 100644
-index 0000000..aec4e8b
---- /dev/null
-+++ b/packages/desktop/src/window/graphics.ts
-@@ -0,0 +1,24 @@
-+import type { CommandLine } from "electron";
-+
-+interface DesktopGraphicsOptions {
-+  platform: NodeJS.Platform;
-+  display: string | undefined;
-+  argv: readonly string[];
-+  commandLine: Pick<CommandLine, "appendSwitch">;
-+}
-+
-+export function configureDesktopGraphics({
-+  platform,
-+  display,
-+  commandLine,
-+  argv,
-+}: DesktopGraphicsOptions): void {
-+  const hasExplicitBackend = argv.some((argument) =>
-+    /^(--ozone-platform|--ozone-platform-hint)(=|$)/.test(argument),
-+  );
-+  if (platform !== "linux" || !display || hasExplicitBackend) return;
-+
-+  // Native Wayland stops producing frames for hidden windows, even with
-+  // background throttling disabled. XWayland keeps background browser tools usable.
-+  commandLine.appendSwitch("ozone-platform", "x11");
-+}
 diff --git a/packages/protocol/src/browser-automation/rpc-schemas.test.ts b/packages/protocol/src/browser-automation/rpc-schemas.test.ts
 index a47f248..a811bf5 100644
 --- a/packages/protocol/src/browser-automation/rpc-schemas.test.ts
