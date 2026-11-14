@@ -116,7 +116,7 @@ index 1d0cfeb..701ca24 100644
        command: executablePath,
        args,
 diff --git a/packages/desktop/e2e/window-startup.e2e.mjs b/packages/desktop/e2e/window-startup.e2e.mjs
-index e6654c0..08fd7fa 100644
+index e6654c0..fcf5d52 100644
 --- a/packages/desktop/e2e/window-startup.e2e.mjs
 +++ b/packages/desktop/e2e/window-startup.e2e.mjs
 @@ -1,11 +1,14 @@
@@ -135,7 +135,7 @@ index e6654c0..08fd7fa 100644
  
  async function launchWindowWithoutHiddenFrames() {
    const main = path.join(root, "main.cjs");
-@@ -37,11 +40,108 @@ async function expectLoadedDesktopIsShown(desktop) {
+@@ -37,11 +40,137 @@ async function expectLoadedDesktopIsShown(desktop) {
    await expect(page.getByRole("heading", { name: "Desktop ready" })).toBeVisible();
  }
  
@@ -152,6 +152,7 @@ index e6654c0..08fd7fa 100644
 +    const { app, BrowserWindow, nativeImage } = require("electron");
 +    const { adaptWebContents } = require(${JSON.stringify(path.join(automationPath, "ipc.js"))});
 +    const { executeAutomationCommand } = require(${JSON.stringify(path.join(automationPath, "service.js"))});
++    const { registerNativeBrowserBridgeIpc } = require(${JSON.stringify(path.join(automationPath, "native-bridge.js"))});
 +    app.setPath("userData", ${JSON.stringify(path.join(root, "background-profile"))});
 +    app.whenReady().then(async () => {
 +      const win = global.backgroundWindow = new BrowserWindow({ show: false, webPreferences: { webviewTag: true } });
@@ -198,6 +199,27 @@ index e6654c0..08fd7fa 100644
 +          throttled: guest.getBackgroundThrottling(),
 +        };
 +      };
++      const handlers = new Map();
++      registerNativeBrowserBridgeIpc({ handle: (channel, handler) => handlers.set(channel, handler) }, {
++        getGuest: (id, host) => id === "background" && host === win.webContents.id ? guest : null,
++        getWorkspaceId: () => "workspace",
++        images: nativeImage,
++      });
++      const native = (channel, input = {}) => handlers.get("paseo:browser:native-" + channel)(
++        { sender: win.webContents }, { browserId: "background", workspaceId: "workspace", ...input },
++      );
++      global.captureHighDpi = async () => {
++        await native("command", { method: "Emulation.setDeviceMetricsOverride", params: {
++          width: 1600, height: 1200, deviceScaleFactor: 2, mobile: false,
++        }});
++        await native("command", { method: "Runtime.evaluate", params: { expression: "scrollTo(0,0)" } });
++        await native("frame");
++        await new Promise(resolve => setTimeout(resolve, 1600));
++        const frame = await native("frame");
++        const image = nativeImage.createFromBuffer(Buffer.from(frame.data.split(",")[1], "base64"));
++        await native("command", { method: "Emulation.clearDeviceMetricsOverride" });
++        return { reported: { width: frame.width, height: frame.height }, encoded: image.getSize() };
++      };
 +      global.backgroundReady = true;
 +    });
 +  `,
@@ -241,14 +263,21 @@ index e6654c0..08fd7fa 100644
 +  desktop = await launchBackgroundBrowser();
 +  await expectBackgroundBrowserWorks(desktop);
 +  console.log("Never-shown browser runs animation callbacks and captures fresh pixels repeatedly");
++  expect(await desktop.evaluate(() => global.captureHighDpi())).toEqual({
++    reported: { width: 1280, height: 960 },
++    encoded: { width: 1280, height: 960 },
++  });
++  console.log(
++    "Native quiet-page capture bounds high-DPI JPEG pixels and reports encoded dimensions",
++  );
  } finally {
    await desktop?.close();
    await rm(root, { recursive: true, force: true });
 diff --git a/packages/desktop/scripts/linux-sandbox/launcher.sh b/packages/desktop/scripts/linux-sandbox/launcher.sh
-index 8f0b6a6..a45fba2 100644
+index 8f0b6a6..4174f8b 100644
 --- a/packages/desktop/scripts/linux-sandbox/launcher.sh
 +++ b/packages/desktop/scripts/linux-sandbox/launcher.sh
-@@ -10,6 +10,26 @@ if [ "${ELECTRON_RUN_AS_NODE:-}" = 1 ]; then
+@@ -10,6 +10,41 @@ if [ "${ELECTRON_RUN_AS_NODE:-}" = 1 ]; then
    exec "$executable" "$@"
  fi
  
@@ -260,14 +289,29 @@ index 8f0b6a6..a45fba2 100644
 +    --ozone-platform|--ozone-platform=*|--ozone-platform-hint|--ozone-platform-hint=*) backend_requested=true ;;
 +  esac
 +done
++backend_value_pending=false
++backend_flags=
 +for flag in ${PASEO_ELECTRON_FLAGS:-}; do
++  if [ "$backend_value_pending" = true ]; then
++    backend_flags="$backend_flags $flag"
++    backend_value_pending=false
++    continue
++  fi
 +  case "$flag" in
++    --ozone-platform|--ozone-platform-hint)
++      backend_flags="$backend_flags $flag"
++      backend_requested=true
++      backend_value_pending=true
++      ;;
 +    --ozone-platform=*|--ozone-platform-hint=*)
-+      set -- "$@" "$flag"
++      backend_flags="$backend_flags $flag"
 +      backend_requested=true
 +      ;;
 +  esac
 +done
++if [ -n "$backend_flags" ]; then
++  set -- $backend_flags "$@"
++fi
 +if [ -n "${DISPLAY:-}" ] && [ "$backend_requested" = false ]; then
 +  set -- --ozone-platform=x11 "$@"
 +fi
@@ -275,7 +319,7 @@ index 8f0b6a6..a45fba2 100644
  for arg in "$@"; do
    if [ "$arg" = '--no-sandbox' ]; then
      export PASEO_DESKTOP_SANDBOX_REASON='requested by --no-sandbox'
-@@ -19,7 +39,6 @@ for arg in "$@"; do
+@@ -19,7 +54,6 @@ for arg in "$@"; do
  done
  
  # Match main's whitespace-separated debugging flags without evaluating shell code.
@@ -284,7 +328,7 @@ index 8f0b6a6..a45fba2 100644
    if [ "$flag" = '--no-sandbox' ]; then
      export PASEO_DESKTOP_SANDBOX_REASON='requested by PASEO_ELECTRON_FLAGS'
 diff --git a/packages/desktop/src/daemon/cli/passthrough.test.ts b/packages/desktop/src/daemon/cli/passthrough.test.ts
-index e891f71..6c34cf1 100644
+index e891f71..70e375a 100644
 --- a/packages/desktop/src/daemon/cli/passthrough.test.ts
 +++ b/packages/desktop/src/daemon/cli/passthrough.test.ts
 @@ -35,6 +35,27 @@ describe("passthrough CLI", () => {
@@ -315,8 +359,30 @@ index e891f71..6c34cf1 100644
    it("ignores macOS GUI launch arguments", () => {
      expect(
        parsePassthroughCliArgs({
+@@ -45,6 +66,21 @@ describe("passthrough CLI", () => {
+     ).toBeNull();
+   });
+ 
++  it.each([
++    ["agent", "send", "ID", "--prompt", "--ozone-platform=x11 causes a blank window"],
++    ["agent", "send", "ID", "--prompt", "--ozone-platform", "wayland"],
++    ["agent", "send", "ID", "--", "--no-sandbox", "--class=example"],
++    ["--", "--ozone-platform=x11", "--ozone-platform-hint", "auto"],
++  ])("preserves command data after launcher switches (%s)", (...args) => {
++    expect(
++      parsePassthroughCliArgs({
++        argv: ["/usr/bin/Paseo", "--no-sandbox", "--ozone-platform=x11", ...args],
++        isDefaultApp: false,
++        forceCli: false,
++      }),
++    ).toEqual(args);
++  });
++
+   it("ignores --no-sandbox injected by Linux wrapper", () => {
+     expect(
+       parsePassthroughCliArgs({
 diff --git a/packages/desktop/src/daemon/cli/passthrough.ts b/packages/desktop/src/daemon/cli/passthrough.ts
-index a315601..c9778e2 100644
+index a315601..64ec723 100644
 --- a/packages/desktop/src/daemon/cli/passthrough.ts
 +++ b/packages/desktop/src/daemon/cli/passthrough.ts
 @@ -2,7 +2,15 @@ import { pathToFileURL } from "node:url";
@@ -336,12 +402,15 @@ index a315601..c9778e2 100644
  
  export type PassthroughCliRunner = (argv: string[]) => Promise<number>;
  
-@@ -14,7 +22,12 @@ export function parsePassthroughCliArgs(input: {
+@@ -12,14 +20,19 @@ export function parsePassthroughCliArgs(input: {
+   forceCli: boolean;
+ }): string[] | null {
    const startIndex = input.isDefaultApp ? 2 : 1;
-   const effective: string[] = [];
- 
+-  const effective: string[] = [];
+-
 -  for (const arg of input.argv.slice(startIndex)) {
-+  for (let index = startIndex; index < input.argv.length; index++) {
++  let index = startIndex;
++  for (; index < input.argv.length; index++) {
 +    const arg = input.argv[index]!;
 +    if (BACKEND_SWITCHES.has(arg)) {
 +      index++;
@@ -350,11 +419,26 @@ index a315601..c9778e2 100644
      if (IGNORED_ARG_PREFIXES.some((prefix) => arg.startsWith(prefix))) {
        continue;
      }
+-    effective.push(arg);
++    break;
+   }
++  const effective = input.argv.slice(index);
+ 
+   if (input.forceCli) {
+     return effective;
 diff --git a/packages/desktop/src/daemon/linux-launcher.posix.test.ts b/packages/desktop/src/daemon/linux-launcher.posix.test.ts
-index ba7a8ec..284739e 100644
+index ba7a8ec..f52491a 100644
 --- a/packages/desktop/src/daemon/linux-launcher.posix.test.ts
 +++ b/packages/desktop/src/daemon/linux-launcher.posix.test.ts
-@@ -55,6 +55,8 @@ async function launch(
+@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ import { expect, test } from "vitest";
++import { parsePassthroughCliArgs } from "./cli/passthrough.js";
+ 
+ // The launcher reads Linux /proc state as well as POSIX command interfaces.
+ const it = test.runIf(process.platform === "linux");
+@@ -55,6 +56,8 @@ async function launch(
        env: {
          ...process.env,
          FORCE_COLOR: undefined,
@@ -363,7 +447,7 @@ index ba7a8ec..284739e 100644
          PATH: `${commands}:${process.env.PATH}`,
          APPIMAGE: "/tmp/Paseo.AppImage",
          PASEO_DESKTOP_SMOKE: "0",
-@@ -121,3 +123,30 @@ it("applies a debugging environment sandbox override before Chromium starts", as
+@@ -121,3 +124,57 @@ it("applies a debugging environment sandbox override before Chromium starts", as
    expect(result.args).toEqual(["--no-sandbox", ...result.input]);
    expect(result.stderr).toContain("requested by PASEO_ELECTRON_FLAGS");
  });
@@ -387,12 +471,39 @@ index ba7a8ec..284739e 100644
 +    namespaces: true,
 +    env: { DISPLAY: ":0", PASEO_ELECTRON_FLAGS: "--ozone-platform=wayland" },
 +  });
-+  expect(result.args).toEqual([...result.input, "--ozone-platform=wayland"]);
++  expect(result.args).toEqual(["--ozone-platform=wayland", ...result.input]);
 +});
++
++it.each(["--ozone-platform wayland", "--ozone-platform-hint auto"])(
++  "passes separate-value environment backend arguments before startup: %s",
++  async (flags) => {
++    const result = await launch({
++      namespaces: true,
++      env: { DISPLAY: ":0", PASEO_ELECTRON_FLAGS: flags },
++    });
++    expect(result.args).toEqual([...flags.split(" "), ...result.input]);
++  },
++);
 +
 +it("does not add graphics flags to Node entrypoints with an X display", async () => {
 +  const result = await launch({ env: { DISPLAY: ":0", ELECTRON_RUN_AS_NODE: "1" } });
 +  expect(result.args).toEqual(result.input);
++});
++
++it("places environment backend switches before CLI arguments without removing prompt text", async () => {
++  const args = ["agent", "send", "ID", "--prompt", "--ozone-platform=x11 causes a blank window"];
++  const result = await launch({
++    namespaces: true,
++    args,
++    env: { DISPLAY: ":0", PASEO_ELECTRON_FLAGS: "--ozone-platform wayland" },
++  });
++  expect(
++    parsePassthroughCliArgs({
++      argv: ["/usr/bin/Paseo", ...result.args],
++      isDefaultApp: false,
++      forceCli: false,
++    }),
++  ).toEqual(args);
 +});
 diff --git a/packages/desktop/src/features/browser-automation/ipc.test.ts b/packages/desktop/src/features/browser-automation/ipc.test.ts
 index 427e86e..82178dc 100644
@@ -748,13 +859,33 @@ index 18e5b84..5053f59 100644
      const hostContents = (event as { sender?: HostWebContents }).sender;
 diff --git a/packages/desktop/src/features/browser-automation/native-bridge.test.ts b/packages/desktop/src/features/browser-automation/native-bridge.test.ts
 new file mode 100644
-index 0000000..dc1ffdd
+index 0000000..b7e608e
 --- /dev/null
 +++ b/packages/desktop/src/features/browser-automation/native-bridge.test.ts
-@@ -0,0 +1,279 @@
+@@ -0,0 +1,347 @@
 +import { EventEmitter } from "node:events";
 +import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-+import { registerNativeBrowserBridgeIpc, type NativeBrowserContents } from "./native-bridge.js";
++import {
++  registerNativeBrowserBridgeIpc,
++  type NativeBrowserContents,
++  type NativeBrowserImage,
++} from "./native-bridge.js";
++
++class Image implements NativeBrowserImage {
++  constructor(private dimensions: { width: number; height: number }) {}
++  getSize() {
++    return this.dimensions;
++  }
++  toBitmap() {
++    return Buffer.alloc(this.dimensions.width * this.dimensions.height * 4);
++  }
++  toJPEG() {
++    return Buffer.from(JSON.stringify(this.dimensions));
++  }
++  resize(dimensions: { width: number; height: number }) {
++    return new Image(dimensions);
++  }
++}
 +
 +class GuestDebugger extends EventEmitter {
 +  private attached = false;
@@ -796,7 +927,7 @@ index 0000000..dc1ffdd
 +  }
 +}
 +const identity = { browserId: "browser", workspaceId: "workspace" };
-+function fixture() {
++function fixture(imageSize = { width: 1280, height: 960 }) {
 +  const host = new Guest(1);
 +  const guest = new Guest(2);
 +  const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>();
@@ -813,10 +944,10 @@ index 0000000..dc1ffdd
 +        browserId === identity.browserId ? identity.workspaceId : null,
 +      images: {
 +        createFromBuffer() {
-+          throw new Error("Unexpected screencast decoding");
++          return new Image(imageSize);
 +        },
-+        createFromBitmap() {
-+          throw new Error("Unexpected screencast encoding");
++        createFromBitmap(_buffer, dimensions) {
++          return new Image(dimensions);
 +        },
 +      },
 +    },
@@ -910,6 +1041,54 @@ index 0000000..dc1ffdd
 +    );
 +    await expect(call("command", { method: "invalid" })).rejects.toThrow();
 +    expect(guest.debugger.sendCommand).not.toHaveBeenCalled();
++  });
++
++  test("bounds high-DPI screenshots and reports the final encoded pixel dimensions", async () => {
++    const { guest, call } = fixture({ width: 3200, height: 2400 });
++    const send = guest.debugger.sendCommand.getMockImplementation()!;
++    guest.debugger.sendCommand.mockImplementation(async (method, params) => {
++      if (method === "Page.getLayoutMetrics")
++        return { cssVisualViewport: { pageX: 0, pageY: 0, clientWidth: 800, clientHeight: 600 } };
++      if (method === "Page.captureScreenshot")
++        return { data: Buffer.alloc(900_000, 1).toString("base64") };
++      return send(method, params);
++    });
++    const dimensions = { width: 1280, height: 960 };
++    await expect(call("frame")).resolves.toEqual({
++      ...dimensions,
++      data: `data:image/jpeg;base64,${Buffer.from(JSON.stringify(dimensions)).toString("base64")}`,
++      capturedAt: 10000,
++    });
++  });
++
++  test("finishes a still capture before changing viewport while allowing unblockers through", async () => {
++    const { guest, call } = fixture();
++    const screenshot = Promise.withResolvers<unknown>();
++    const started = Promise.withResolvers<void>();
++    const send = guest.debugger.sendCommand.getMockImplementation()!;
++    guest.debugger.sendCommand.mockImplementation(async (method, params) => {
++      if (method === "Page.captureScreenshot") {
++        started.resolve();
++        return screenshot.promise;
++      }
++      return send(method, params);
++    });
++    const capturing = call("frame");
++    await started.promise;
++    const params = { width: 800, height: 600, deviceScaleFactor: 2, mobile: true };
++    const emulating = call("command", { method: "Emulation.setDeviceMetricsOverride", params });
++    await call("command", { method: "Page.handleJavaScriptDialog", params: { accept: false } });
++    expect(guest.debugger.sendCommand).not.toHaveBeenCalledWith(
++      "Emulation.setDeviceMetricsOverride",
++      params,
++    );
++    screenshot.resolve({ data: Buffer.from("fresh jpeg").toString("base64") });
++    await capturing;
++    await emulating;
++    expect(guest.debugger.sendCommand).toHaveBeenLastCalledWith(
++      "Emulation.setDeviceMetricsOverride",
++      params,
++    );
 +  });
 +
 +  test("restricts browser-wide commands and maps cookies and permissions to the registered guest", async () => {
@@ -1033,16 +1212,16 @@ index 0000000..dc1ffdd
 +});
 diff --git a/packages/desktop/src/features/browser-automation/native-bridge.ts b/packages/desktop/src/features/browser-automation/native-bridge.ts
 new file mode 100644
-index 0000000..ecab97f
+index 0000000..ba69dd3
 --- /dev/null
 +++ b/packages/desktop/src/features/browser-automation/native-bridge.ts
-@@ -0,0 +1,428 @@
+@@ -0,0 +1,455 @@
 +import {
 +  NativeBrowserFrameRequestSchema,
 +  NativeBrowserCommandRequestSchema,
 +  NativeBrowserEventsRequestSchema,
 +} from "@getpaseo/protocol/browser-native";
-+import type { WebContents, nativeImage } from "electron";
++import type { WebContents, NativeImage } from "electron";
 +import type { NativeBrowserEvent, NativeBrowserFrame } from "@getpaseo/protocol/browser-native";
 +
 +export interface NativeBrowserContents extends Pick<
@@ -1052,10 +1231,17 @@ index 0000000..ecab97f
 +  debugger: Pick<WebContents["debugger"], "on" | "attach" | "isAttached" | "sendCommand">;
 +}
 +
++export interface NativeBrowserImage extends Pick<NativeImage, "getSize" | "toBitmap" | "toJPEG"> {
++  resize(options: { width: number; height: number }): NativeBrowserImage;
++}
++
 +export interface NativeBrowserBridgeDependencies {
 +  getGuest(browserId: string, hostId: number): NativeBrowserContents | null;
 +  getWorkspaceId(browserId: string): string | null;
-+  images: Pick<typeof nativeImage, "createFromBuffer" | "createFromBitmap">;
++  images: {
++    createFromBuffer(buffer: Buffer): NativeBrowserImage;
++    createFromBitmap(buffer: Buffer, size: { width: number; height: number }): NativeBrowserImage;
++  };
 +}
 +
 +interface Capture {
@@ -1283,7 +1469,11 @@ index 0000000..ecab97f
 +  }
 +}
 +
-+async function captureStillFrame(contents: NativeBrowserContents, capture: Capture): Promise<void> {
++async function captureStillFrame(
++  contents: NativeBrowserContents,
++  capture: Capture,
++  captureImages: NativeBrowserBridgeDependencies["images"],
++): Promise<void> {
 +  const generation = capture.generation;
 +  const capturedAt = Date.now();
 +  const metrics = await contents.debugger.sendCommand("Page.getLayoutMetrics");
@@ -1307,13 +1497,26 @@ index 0000000..ecab97f
 +  if (
 +    typeof result.data !== "string" ||
 +    !/^[A-Za-z0-9+/=]+$/.test(result.data) ||
-+    result.data.length > 1_099_900
++    result.data.length > 8_000_000
 +  )
-+    throw new Error("Native screenshot exceeds the image size limit or is invalid");
++    throw new Error("Native screenshot is invalid or exceeds the decode size limit");
++  let image = captureImages.createFromBuffer(Buffer.from(result.data, "base64"));
++  const dimensions = image.getSize();
++  if (dimensions.width <= 0 || dimensions.height <= 0)
++    throw new Error("Native screenshot has no pixels");
++  const imageScale = Math.min(1, 1280 / dimensions.width, 960 / dimensions.height);
++  let data = result.data;
++  if (imageScale < 1) {
++    image = image.resize({
++      width: Math.max(1, Math.floor(dimensions.width * imageScale)),
++      height: Math.max(1, Math.floor(dimensions.height * imageScale)),
++    });
++    data = image.toJPEG(65).toString("base64");
++  }
++  if (data.length > 1_099_900) throw new Error("Native screenshot exceeds the image size limit");
 +  capture.frame = {
-+    data: `data:image/jpeg;base64,${result.data}`,
-+    width: Math.max(1, Math.round(width * scale)),
-+    height: Math.max(1, Math.round(height * scale)),
++    data: `data:image/jpeg;base64,${data}`,
++    ...image.getSize(),
 +    capturedAt,
 +  };
 +}
@@ -1387,9 +1590,12 @@ index 0000000..ecab97f
 +      // screenshot rather than relabeling an old paint with a new timestamp.
 +      if (!capture.stillTask && Date.now() - capture.lastStillAttemptAt >= 1000) {
 +        capture.lastStillAttemptAt = Date.now();
-+        capture.stillTask = captureStillFrame(contents, capture).finally(() => {
-+          capture.stillTask = null;
-+        });
++        capture.stillTask = capture.tail
++          .then(() => captureStillFrame(contents, capture, dependencies.images))
++          .finally(() => {
++            capture.stillTask = null;
++          });
++        capture.tail = capture.stillTask.catch(() => undefined);
 +      }
 +      if (capture.stillTask) await capture.stillTask;
 +    }
@@ -1465,6 +1671,30 @@ index 0000000..ecab97f
 +    return { events, dropped };
 +  });
 +}
+diff --git a/packages/desktop/src/main.ts b/packages/desktop/src/main.ts
+index 072f96a..4064b42 100644
+--- a/packages/desktop/src/main.ts
++++ b/packages/desktop/src/main.ts
+@@ -339,9 +339,17 @@ if (forcedUserDataDir) {
+ // Must run before app.whenReady().
+ const electronFlags = process.env.PASEO_ELECTRON_FLAGS?.trim();
+ if (electronFlags) {
+-  for (const token of electronFlags.split(/\s+/)) {
++  const tokens = electronFlags.split(/\s+/);
++  for (let index = 0; index < tokens.length; index++) {
++    const token = tokens[index]!;
+     const [key, ...rest] = token.replace(/^--/, "").split("=");
+-    app.commandLine.appendSwitch(key, rest.join("=") || undefined);
++    let value = rest.join("=") || undefined;
++    const backend = key === "ozone-platform" || key === "ozone-platform-hint";
++    if (backend && !token.includes("=")) {
++      value = tokens[++index];
++    }
++    if (backend && app.commandLine.hasSwitch(key)) continue;
++    app.commandLine.appendSwitch(key, value);
+   }
+   log.info("[electron-flags]", electronFlags);
+ }
 diff --git a/packages/desktop/src/preload.ts b/packages/desktop/src/preload.ts
 index 0942134..2aa3282 100644
 --- a/packages/desktop/src/preload.ts
