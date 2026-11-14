@@ -1,3 +1,4 @@
+import { isBrowserAction, runBrowserAction, browserActionSchemas } from "../../shared/browser-actions";
 import { advancedToolSchemas } from './advanced-tools';
 
 type Event = { method: string; params: unknown; sessionId?: string };
@@ -10,6 +11,7 @@ export class WorkspaceCdp {
   private sequence = 0;
   private pending = new Map<number, Pending>();
   private sessions = new Map<string, string>();
+  private sessionOpenings = new Map<string, Promise<string>>();
   private events: Event[] = [];
   private dropped = 0;
   constructor(private readonly endpoint: () => Promise<string>) {}
@@ -50,7 +52,7 @@ export class WorkspaceCdp {
   private reset(error: Error) {
     this.socket = null;
     for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(error); }
-    this.pending.clear(); this.sessions.clear(); this.events = []; this.dropped = 0;
+    this.pending.clear(); this.sessions.clear(); this.sessionOpenings.clear(); this.events = []; this.dropped = 0;
   }
   private async send(method: string, params: unknown, sessionId?: string): Promise<any> {
     await this.connect();
@@ -68,15 +70,32 @@ export class WorkspaceCdp {
   private async session(targetId?: string) {
     if (!targetId) return undefined;
     await this.connect();
-    let id = this.sessions.get(targetId);
-    if (!id) {
-      const result = await this.send('Target.attachToTarget', { targetId, flatten: true });
-      id = result.sessionId as string;
-      this.sessions.set(targetId, id);
+    const cached = this.sessions.get(targetId);
+    if (cached) return cached;
+    let opening = this.sessionOpenings.get(targetId);
+    if (!opening) {
+      opening = (async () => {
+        const result = await this.send('Target.attachToTarget', { targetId, flatten: true });
+        const id = result.sessionId as string;
+        // Enable before exposing the session: Page events must be observable even
+        // when the first caller opens a dialog through Runtime or navigation.
+        await this.send('Page.enable', {}, id);
+        this.sessions.set(targetId, id);
+        return id;
+      })();
+      this.sessionOpenings.set(targetId, opening);
     }
-    return id;
+    try { return await opening; }
+    finally { if (this.sessionOpenings.get(targetId) === opening) this.sessionOpenings.delete(targetId); }
   }
+
   async call(name: string, args: unknown): Promise<unknown> {
+    if (isBrowserAction(name)) {
+      const input = browserActionSchemas[name].parse(args);
+      if (!input.targetId) throw Error('A page targetId from Target.getTargets is required');
+      const sessionId = await this.session(input.targetId);
+      return runBrowserAction(name, input, (method, params) => this.send(method, params, sessionId));
+    }
     if (name === 'cdp_send') {
       const input = advancedToolSchemas.cdp_send.parse(args);
       return this.send(input.method, input.params, await this.session(input.targetId));

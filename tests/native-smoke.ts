@@ -100,6 +100,7 @@ window.webContents.on('console-message',(...args)=>console.log('RENDERER',...arg
 `;
 await build({
   stdin: { contents: main, resolveDir: process.cwd(), sourcefile: "native-main.ts" },
+  nodePaths: [resolve("node_modules")],
   bundle: true,
   platform: "node",
   format: "esm",
@@ -150,6 +151,13 @@ try {
   };
   await call("native_browser_open", { url: `${url}/fixture` });
   await call("shared_browser_acquire_control");
+  const inspection = await call("browser_inspect", { selector: "h1", properties: ["display", "font-size"] });
+  assert.match(inspection.html, /Real native Chromium/);
+  assert.equal(inspection.computedStyle.display, "block");
+  const { root: domRoot } = await call("browser_dom", { action: { kind: "document" } });
+  const { nodeId: headingNode } = await call("browser_dom", { action: { kind: "query", nodeId: domRoot.nodeId, selector: "h1" } });
+  const styles = await call("browser_css", { action: { kind: "matched", nodeId: headingNode } });
+  assert.ok(Array.isArray(styles.matchedCSSRules));
   await call("browser_cookies", {
     action: "set",
     cookies: [{ name: "native_session", value: "same-profile", url, httpOnly: true }],
@@ -177,6 +185,31 @@ try {
   assert.ok(!screenshot.isError, JSON.stringify(screenshot));
   assert.equal(screenshot.content[0].type, "image");
   await call("cdp_send", { method: "Runtime.enable" });
+  await call("cdp_send", { method: "Page.enable" });
+  const waitForEvent = async (method: string) => {
+    for (let attempt = 0; attempt < 40; attempt++) {
+      const result = await call("cdp_events", { method });
+      if (result.events.length) return result.events[0];
+      await pause(100);
+    }
+    throw Error(`Missing native event ${method}`);
+  };
+  const prompted = call("cdp_send", { method: "Runtime.evaluate", params: { expression: "confirm('Native DevTools confirm')", returnByValue: true } });
+  await waitForEvent("Page.javascriptDialogOpening");
+  await call("browser_dialog", { accept: true, promptText: "native reply" });
+  assert.equal((await prompted).result.value, true);
+  await call("cdp_send", { method: "Debugger.enable" });
+  const paused = call("cdp_send", { method: "Runtime.evaluate", params: { expression: "(() => { const local = 42; debugger; return local; })()", returnByValue: true } });
+  const pausedEvent = await waitForEvent("Debugger.paused");
+  const pausedFrame = pausedEvent.params.callFrames[0];
+  const localValue = await call("cdp_send", { method: "Debugger.evaluateOnCallFrame", params: { callFrameId: pausedFrame.callFrameId, expression: "local", returnByValue: true } });
+  assert.equal(localValue.result.value, 42);
+  const scope = pausedFrame.scopeChain.find((item: any) => item.type === "local");
+  const locals = await call("cdp_send", { method: "Runtime.getProperties", params: { objectId: scope.object.objectId } });
+  assert.ok(locals.result.some((item: any) => item.name === "local" && item.value.value === 42));
+  await call("cdp_send", { method: "Debugger.resume" });
+  assert.equal((await paused).result.value, 42);
+  await call("cdp_send", { method: "Debugger.disable" });
   const scopedCookies=await call("cdp_send",{method:"Storage.getCookies"});assert.ok(scopedCookies.cookies.some((cookie:any)=>cookie.name==='native_session'));
   const outside:any=await mcp.callTool({name:"cdp_send",arguments:{method:"Network.getAllCookies",params:{browserContextId:"other-context"}}});assert.equal(outside.isError,true);
   const targets = await call("cdp_send", { method: "Target.getTargets" });
@@ -250,7 +283,7 @@ try {
   assert.ok(Number(white)>0.5,`Parked native page lost its painted content: white fraction=${white}`);
   assert.deepEqual(errors, []);
   console.log(
-    `PASS: native Electron WebView, native snapshots/screenshots/tabs, CDP/HttpOnly cookies, parked-pane mobile mirror and touch;  ${sequences.size} fresh frames/3s; human control fences agent tools.`,
+    `PASS: native Electron WebView, native snapshots/screenshots/tabs, DOM/CSS, CDP/HttpOnly cookies, dialog replies and debugger resume, parked-pane mobile mirror and touch;  ${sequences.size} fresh frames/3s; human control fences agent tools.`,
   );
 } catch (error) {
   console.error(log.slice(-10_000));

@@ -26,6 +26,17 @@ type Workspace = {
 };
 const OWNER_TTL = 5_000;
 const VIEWER_TTL = 2_500;
+const CDP_UNBLOCKERS = new Set([
+  "Debugger.evaluateOnCallFrame", "Debugger.getScriptSource", "Runtime.getProperties",
+  "Page.handleJavaScriptDialog", "Debugger.resume", "Debugger.stepInto", "Debugger.stepOut",
+  "Debugger.stepOver", "Debugger.disable", "Runtime.terminateExecution", "Runtime.runIfWaitingForDebugger",
+  "Fetch.continueRequest", "Fetch.continueResponse", "Fetch.fulfillRequest", "Fetch.failRequest",
+  "Fetch.continueWithAuth", "Fetch.disable",
+]);
+function canUnblock(command: NativeCommand): boolean {
+  return command.operation === "cdp_events" || command.operation === "browser_dialog" ||
+    (command.operation === "cdp_send" && typeof command.input.method === "string" && CDP_UNBLOCKERS.has(command.input.method));
+}
 const CONTROL_TTL = 30_000;
 
 /** Workspace-bound command mailbox. Published mutations are never retried. */
@@ -131,13 +142,11 @@ export class NativeRelay {
       else pending.resolve(result.result);
     }
     const commands: NativeCommand[] = [];
-    // One in-flight command preserves native input and CDP ordering.
-    if (
-      input.state &&
-      !workspace.takeover &&
-      ![...workspace.pending.values()].some((p) => p.dispatched)
-    ) {
+    // Keep input ordered, but permit event reads and replies that unblock paused JavaScript.
+    const inFlight = [...workspace.pending.values()].some((p) => p.dispatched);
+    if (input.state && !workspace.takeover) {
       for (const next of workspace.pending.values()) {
+        if (next.dispatched || (inFlight && !canUnblock(next.command))) continue;
         if (
           !["tabs.list", "open"].includes(next.command.operation) &&
           workspace.control?.id !== next.owner
@@ -197,8 +206,10 @@ export class NativeRelay {
         throw Error("Browser control transfer is pending");
       if (workspace.control && workspace.control.id !== id && (!human || workspace.control.human))
         throw Error("Browser is controlled by another participant");
-      const pending = [...workspace.pending.values()].find((p) => p.dispatched && p.owner !== id);
-      if (pending) {
+      for (;;) {
+        if (this.stopped) throw Error("Native browser relay stopped");
+        const pending = [...workspace.pending.values()].find((p) => p.dispatched && p.owner !== id);
+        if (!pending) break;
         workspace.takeover = id;
         await pending.settled;
       }
@@ -243,12 +254,18 @@ export class NativeRelay {
       };
       const command = { id: randomUUID(), operation, input };
       const timer = setTimeout(() => {
-        workspace.pending.delete(command.id);
-        refuse(
-          Error(
-            "Native browser command timed out. Keep Paseo Desktop connected to this host so it can start the workspace browser. Dispatched mutations are not retried.",
-          ),
+        const pending = workspace.pending.get(command.id);
+        if (!pending) return;
+        const error = Error(
+          "Native browser command timed out. Keep Paseo Desktop connected to this host so it can start the workspace browser. Dispatched mutations are not retried.",
         );
+        if (pending.dispatched) {
+          // The caller's timeout does not end execution on Desktop.
+          reject(error);
+        } else {
+          workspace.pending.delete(command.id);
+          refuse(error);
+        }
       }, 15_000);
       workspace.pending.set(command.id, {
         command,

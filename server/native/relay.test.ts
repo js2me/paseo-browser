@@ -1,8 +1,9 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { NativeRelay } from "./relay";
 const relays: NativeRelay[] = [];
 afterEach(async () => {
   await Promise.all(relays.splice(0).map((relay) => relay.close()));
+  vi.useRealTimers();
 });
 const state = {
   browserId: "native-one",
@@ -178,4 +179,88 @@ it('announces mobile viewer demand before a desktop browser exists', () => {
   expect(relay.presence()).toEqual({ workspaceIds: [], requestedWorkspaceIds: ['phone-only-workspace'] });
   now += 3000;
   expect(relay.presence().requestedWorkspaceIds).toEqual([]);
+});
+
+it("allows event reads and dialog replies while an earlier command waits, retaining ordinary action ordering", async () => {
+  const relay = fixture();
+  exchange(relay);
+  await relay.control("workspace", "agent", false, "acquire");
+  const evaluating = relay.command("workspace", "agent", "cdp_send", { method: "Runtime.evaluate" });
+  const evaluation = exchange(relay).commands[0];
+  const navigating = relay.command("workspace", "agent", "navigate", {});
+  const reading = relay.command("workspace", "agent", "cdp_events", {});
+  const events = exchange(relay).commands[0];
+  expect(events.operation).toBe("cdp_events");
+  exchange(relay, [{ id: events.id, result: { events: [] } }]);
+  await reading;
+  const inspecting = relay.command("workspace", "agent", "cdp_send", { method: "Debugger.evaluateOnCallFrame", params: { callFrameId: "frame", expression: "local" } });
+  const inspection = exchange(relay).commands[0];
+  expect(inspection.input.method).toBe("Debugger.evaluateOnCallFrame");
+  exchange(relay, [{ id: inspection.id, result: { result: { value: 42 } } }]);
+  expect(await inspecting).toEqual({ result: { value: 42 } });
+  const replying = relay.command("workspace", "agent", "browser_dialog", { accept: false });
+  const reply = exchange(relay).commands[0];
+  expect(reply.operation).toBe("browser_dialog");
+  exchange(relay, [{ id: reply.id, result: {} }]);
+  await replying;
+  const next = exchange(relay, [{ id: evaluation.id, result: {} }]).commands[0];
+  await evaluating;
+  expect(next.operation).toBe("navigate");
+  exchange(relay, [{ id: next.id, result: {} }]);
+  await navigating;
+});
+
+it("waits for every dispatched command before handing control to a human", async () => {
+  const relay = fixture();
+  exchange(relay);
+  await relay.control("workspace", "agent", false, "acquire");
+  const evaluating = relay.command("workspace", "agent", "cdp_send", { method: "Runtime.evaluate" });
+  const evaluation = exchange(relay).commands[0];
+  const inspecting = relay.command("workspace", "agent", "cdp_send", { method: "Debugger.evaluateOnCallFrame" });
+  const inspection = exchange(relay).commands[0];
+  expect(inspection.input.method).toBe("Debugger.evaluateOnCallFrame");
+  const takeover = relay.control("workspace", phone, true, "acquire");
+  exchange(relay, [{ id: evaluation.id, result: 42 }]);
+  await evaluating;
+  await Promise.resolve();
+  expect(relay.watch("workspace", phone, 0).controller).toBe("agent");
+  expect(exchange(relay).commands).toEqual([]);
+  exchange(relay, [{ id: inspection.id, result: {} }]);
+  await inspecting;
+  expect(await takeover).toEqual({ controller: phone });
+});
+
+it("keeps timed-out execution tracked until Desktop confirms completion before takeover", async () => {
+  vi.useFakeTimers();
+  const relay = fixture(() => 1000);
+  exchange(relay);
+  await relay.control("workspace", "agent", false, "acquire");
+  const result = relay.command("workspace", "agent", "cdp_send", { method: "Runtime.evaluate" })
+    .catch((error: Error) => error.message);
+  const command = exchange(relay).commands[0];
+  let tookControl = false;
+  const takeover = relay.control("workspace", phone, true, "acquire").then((result) => {
+    tookControl = true;
+    return result;
+  });
+  await vi.advanceTimersByTimeAsync(15_000);
+  expect(await result).toContain("timed out");
+  expect(tookControl).toBe(false);
+  expect(relay.watch("workspace", phone, 0).controller).toBe("agent");
+  expect(exchange(relay).commands).toEqual([]);
+  exchange(relay, [{ id: command.id, result: { finished: true } }]);
+  expect(await takeover).toEqual({ controller: phone });
+});
+
+it("removes an undispatched timeout without blocking human control", async () => {
+  vi.useFakeTimers();
+  const relay = fixture(() => 1000);
+  exchange(relay);
+  await relay.control("workspace", "agent", false, "acquire");
+  const result = relay.command("workspace", "agent", "navigate", { url: "https://example.test" })
+    .catch((error: Error) => error.message);
+  await vi.advanceTimersByTimeAsync(15_000);
+  expect(await result).toContain("timed out");
+  expect(await relay.control("workspace", phone, true, "acquire")).toEqual({ controller: phone });
+  expect(exchange(relay).commands).toEqual([]);
 });

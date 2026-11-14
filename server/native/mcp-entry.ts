@@ -3,7 +3,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { advancedTools } from "../workspace/advanced-tools";
+import { advancedTools, advancedToolSchemas } from "../workspace/advanced-tools";
 const schemas = {
   shared_browser_status: z.object({}),
   shared_browser_acquire_control: z.object({}),
@@ -74,6 +74,8 @@ server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
     let value: unknown = input;
     const schema = schemas[params.name as keyof typeof schemas];
     if (schema) schema.parse(input);
+    if (Object.hasOwn(advancedToolSchemas, params.name))
+      value = advancedToolSchemas[params.name as keyof typeof advancedToolSchemas].parse(input);
     if (params.name === "shared_browser_status") operation = "status";
     if (params.name === "shared_browser_acquire_control") operation = "acquire-control";
     if (params.name === "shared_browser_release_control") operation = "release-control";

@@ -68,10 +68,10 @@ export function contributeSharedBrowserClient(client: PluginClientContext) {
       workspaceId,
       agentId: agent.id,
       button: {
-        title: "Open Workspace Browser",
+        title: "Open Browser",
         // Composer pills remain mounted on phones when header actions are in the menu.
         icon: HeaderIcon,
-        label: "Workspace Browser",
+        label: "Browser",
         behavior: {
           kind: "action",
           onPress() {

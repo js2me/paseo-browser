@@ -41,14 +41,14 @@ export default function contribute(client: PluginClientContext) {
   });
   const panel = client.addWorkspacePanel({
     id: "workspace-browser",
-    title: "Workspace Browser",
+    title: "Browser",
     icon: "PanelsTopLeft",
     locations: ["workspace", "explorer"],
     Component: BrowserPanel,
   });
   const command = client.addCommandCenterItem({
     id: "open-workspace-browser",
-    title: "Open Workspace Browser",
+    title: "Open Browser",
     icon: "PanelsTopLeft",
     context: "workspace",
     onSelect({ openPanel }) {

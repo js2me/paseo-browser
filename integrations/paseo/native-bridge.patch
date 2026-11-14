@@ -1,58 +1,1306 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 285ff8e..89b15d5 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -367,6 +367,10 @@ jobs:
+         if: ${{ runner.os == 'Linux' }}
+         run: npm run test:e2e:renderer --workspace=@getpaseo/desktop
+ 
++      - name: Run desktop startup and background browser E2E
++        if: ${{ runner.os == 'Linux' }}
++        run: xvfb-run -a npm run test:e2e:window-startup --workspace=@getpaseo/desktop
++
+       - name: Run desktop browser E2E
+         if: ${{ runner.os == 'Linux' }}
+         run: npm run test:e2e:browser-tabs --workspace=@getpaseo/desktop
+diff --git a/docs/browser-capture-harness.md b/docs/browser-capture-harness.md
+index f760faf..5969704 100644
+--- a/docs/browser-capture-harness.md
++++ b/docs/browser-capture-harness.md
+@@ -116,8 +116,15 @@ layering inside `overlay-root`. Activating a presented browser also focuses its
+ There is no renderer prep/restore handshake or lifetime background-throttling override.
+ Screenshot capture temporarily enables frame production inside the shared serialized queue,
+ restores the previous throttling policy on success or failure, and retains a 5-second capture budget.
+-The browser tool takes one viewport frame through Electron's frame subscription and releases the
+-subscription on completion or cancellation. A resized resident guest can produce fresh pixels
+-while `capturePage()` leaves its surface-copy request pending; waiting for animation frames or
+-retrying the copy does not repair that state. Full-page screenshots retain the CDP path with layout
+-metrics and screenshot clip.
++Viewport screenshots use CDP with an explicit visual-viewport clip, including its scroll coordinates.
++The clip stays bounded to the viewport while `captureBeyondViewport` lets Chromium render it without
++waiting for another compositor paint. Frame subscriptions can stall on static hidden guests even when
++JavaScript and animation callbacks are running. Full-page screenshots use the same CDP path with the
++page content bounds.
++
++The startup E2E also creates a never-shown window and checks animation callbacks, repeated viewport
++captures, viewport resizing, and scrolled pixel content. Run it with:
++
++```bash
++xvfb-run -a npm run test:e2e:window-startup --workspace=@getpaseo/desktop
++```
+diff --git a/docs/development.md b/docs/development.md
+index ddebf3f..3b7db0b 100644
+--- a/docs/development.md
++++ b/docs/development.md
+@@ -341,7 +341,15 @@ it did not start while every process is alive. `showWindowWhenReady`
+ the document finishes loading if the event has not arrived. The fallback is
+ Linux-only; macOS and Windows keep waiting for `ready-to-show`.
+ 
+-Run the startup regression on Linux with an isolated display:
++The packaged Linux launcher selects X11 before starting Electron when an X display is available,
++including XWayland in a Wayland session. Switching Ozone from JavaScript is too late: it can leave
++native windows and GPU subprocesses using different backends. Native Wayland can stop producing frames for hidden windows even with background throttling disabled,
++which stalls browser animation callbacks and screenshots. Explicit `--ozone-platform` and
++`--ozone-platform-hint` arguments, including those in `PASEO_ELECTRON_FLAGS`, retain the requested
++backend. The launcher forwards environment backend arguments onto argv before initialization; the
++CLI passthrough parser excludes these graphics arguments from CLI commands. A session without an X display keeps Electron's native backend selection.
++
++Run the startup and background-browser regressions on Linux with an isolated display:
+ 
+ ```bash
+ xvfb-run -a npm run test:e2e:window-startup --workspace=@getpaseo/desktop
+diff --git a/docs/testing.md b/docs/testing.md
+index afe7cea..375c88f 100644
+--- a/docs/testing.md
++++ b/docs/testing.md
+@@ -119,6 +119,9 @@ The Desktop Packages workflow runs the Linux x64 smoke under Xvfb on main pushes
+ Never repair `chrome-sandbox` in the smoke harness. The old unpacked smoke set its mode to 4755 and concealed a broken package installer. Run installer tests as root and launch tests as an ordinary user: a root-run namespace probe does not reproduce Ubuntu's AppArmor policy for desktop users. Preserve both restricted and unrestricted cases; either one alone permits another sandbox regression.
+ 
+ Smoke jobs upload renderer screenshots and desktop/daemon diagnostics, including successful Linux sandbox evidence.
++On a Linux workstation, set `PASEO_DESKTOP_SMOKE_USE_EXISTING_DISPLAY=1` to exercise the real desktop
++session instead of Xvfb. Use an isolated profile as the harness normally does; an Xvfb-only pass does
++not cover native Wayland/XWayland startup.
+ 
+ To exercise the smoke locally on Linux:
+ 
+diff --git a/packages/app/src/desktop/host.ts b/packages/app/src/desktop/host.ts
+index 2541da9..e9890df 100644
+--- a/packages/app/src/desktop/host.ts
++++ b/packages/app/src/desktop/host.ts
+@@ -1,3 +1,10 @@
++import type {
++  NativeBrowserFrameRequest,
++  NativeBrowserCommandRequest,
++  NativeBrowserEventsRequest,
++  NativeBrowserFrame,
++  NativeBrowserEvents,
++} from "@getpaseo/protocol/browser-native";
+ import { Platform } from "react-native";
+ import { getElectronHost } from "@/desktop/electron/host";
+ import type { BrowserKeyboardPolicy } from "@/keyboard";
+@@ -145,6 +152,10 @@ export interface DesktopAttachedBrowserRegistration {
+ }
+ 
+ export interface DesktopBrowserBridge {
++  readonly nativeBridgeVersion?: number;
++  captureNativeFrame?: (input: NativeBrowserFrameRequest) => Promise<NativeBrowserFrame | null>;
++  sendNativeCommand?: (input: NativeBrowserCommandRequest) => Promise<unknown>;
++  readNativeEvents?: (input: NativeBrowserEventsRequest) => Promise<NativeBrowserEvents>;
+   setShortcutPolicy?: (input: BrowserKeyboardPolicy) => Promise<void>;
+   readonly profilePartition?: string;
+   registerAttachedBrowser?: (input: DesktopAttachedBrowserRegistration) => Promise<void>;
+diff --git a/packages/desktop/e2e/packaged-app-smoke.js b/packages/desktop/e2e/packaged-app-smoke.js
+index 1d0cfeb..701ca24 100644
+--- a/packages/desktop/e2e/packaged-app-smoke.js
++++ b/packages/desktop/e2e/packaged-app-smoke.js
+@@ -94,7 +94,10 @@ function getMacMainExecutablePath(appPath) {
+ }
+ 
+ function getLaunchCommand(executablePath, args) {
+-  if (process.platform !== "linux") {
++  if (
++    process.platform !== "linux" ||
++    process.env.PASEO_DESKTOP_SMOKE_USE_EXISTING_DISPLAY === "1"
++  ) {
+     return {
+       command: executablePath,
+       args,
+diff --git a/packages/desktop/e2e/window-startup.e2e.mjs b/packages/desktop/e2e/window-startup.e2e.mjs
+index e6654c0..fcf5d52 100644
+--- a/packages/desktop/e2e/window-startup.e2e.mjs
++++ b/packages/desktop/e2e/window-startup.e2e.mjs
+@@ -1,11 +1,14 @@
+ import { mkdtemp, rm, writeFile } from "node:fs/promises";
+ import { tmpdir } from "node:os";
+ import path from "node:path";
+-import { fileURLToPath } from "node:url";
++import { fileURLToPath, pathToFileURL } from "node:url";
+ import { _electron as electron, expect } from "playwright/test";
+ 
+ const root = await mkdtemp(path.join(tmpdir(), "paseo-window-startup-"));
+ const modulePath = fileURLToPath(new URL("../dist/window/show-when-ready.js", import.meta.url));
++const automationPath = fileURLToPath(
++  new URL("../dist/features/browser-automation/", import.meta.url),
++);
+ 
+ async function launchWindowWithoutHiddenFrames() {
+   const main = path.join(root, "main.cjs");
+@@ -37,11 +40,137 @@ async function expectLoadedDesktopIsShown(desktop) {
+   await expect(page.getByRole("heading", { name: "Desktop ready" })).toBeVisible();
+ }
+ 
++async function launchBackgroundBrowser() {
++  const fixture = path.join(root, "background.html");
++  await writeFile(
++    fixture,
++    '<!doctype html><style>html{scrollbar-width:none}body{margin:0;width:2400px;height:2400px;background:rgb(0,200,0)}</style><h1>Background page</h1><div id="scroll-target" style="position:absolute;left:320px;top:1200px;width:1280px;height:800px"></div>',
++  );
++  const main = path.join(root, "background.cjs");
++  await writeFile(
++    main,
++    `
++    const { app, BrowserWindow, nativeImage } = require("electron");
++    const { adaptWebContents } = require(${JSON.stringify(path.join(automationPath, "ipc.js"))});
++    const { executeAutomationCommand } = require(${JSON.stringify(path.join(automationPath, "service.js"))});
++    const { registerNativeBrowserBridgeIpc } = require(${JSON.stringify(path.join(automationPath, "native-bridge.js"))});
++    app.setPath("userData", ${JSON.stringify(path.join(root, "background-profile"))});
++    app.whenReady().then(async () => {
++      const win = global.backgroundWindow = new BrowserWindow({ show: false, webPreferences: { webviewTag: true } });
++      const attached = new Promise(resolve => win.webContents.once("did-attach-webview", (_event, guest) => resolve(guest)));
++      await win.loadURL("data:text/html," + encodeURIComponent(
++        '<div style="position:fixed;left:0;top:0;width:1px;height:1px;overflow:hidden;pointer-events:none">' +
++        '<webview style="display:inline-flex;position:absolute;left:0;top:0;width:1280px;height:800px" src="' +
++        ${JSON.stringify(pathToFileURL(fixture).href)} + '"></webview></div>'
++      ));
++      const guest = await attached;
++      if (guest.isLoading()) await new Promise(resolve => guest.once("did-finish-load", resolve));
++      const tab = adaptWebContents(guest);
++      const registry = {
++        getTabContents: () => tab,
++        listRegisteredBrowserIds: () => ["background"],
++        listRegisteredBrowserIdsForWorkspace: () => ["background"],
++        getBrowserWorkspaceId: () => "workspace",
++        getWorkspaceActiveBrowserId: () => "background",
++      };
++      const run = command => executeAutomationCommand({
++        type: "browser.automation.execute.request", requestId: "background", workspaceId: "workspace", command,
++      }, registry);
++      global.captureBackground = async color => {
++        if (color[0] > 0) await tab.sendDebugCommand("Emulation.setDeviceMetricsOverride", {
++          width: 800, height: 600, deviceScaleFactor: 1, mobile: false,
++        });
++        const evaluated = await run({ command: "evaluate", args: {
++          browserId: "background",
++          function: '() => new Promise(resolve => { const timeout = setTimeout(() => resolve("animation frame stalled"), 2500); requestAnimationFrame(() => { clearTimeout(timeout); document.body.style.background = ' +
++            JSON.stringify('rgb(' + color.join(',') + ')') + '; if (' + color[0] + ' > 0) { document.querySelector("#scroll-target").style.background = document.body.style.background; document.body.style.background = "black"; } scrollTo(' + (color[0] ? 320 : 0) + ',' + (color[0] ? 1200 : 0) + '); resolve(document.querySelector("h1").textContent); }); })',
++        }});
++        const screenshot = await run({ command: "screenshot", args: { browserId: "background", fullPage: false } });
++        if (!evaluated.ok || !screenshot.ok) return { evaluated, screenshot };
++        const image = nativeImage.createFromBuffer(Buffer.from(screenshot.result.dataBase64, "base64"));
++        const size = image.getSize();
++        const offset = (Math.floor(size.height / 2) * size.width + Math.floor(size.width / 2)) * 4;
++        const pixels = image.toBitmap();
++        return {
++          text: JSON.parse(evaluated.result.resultJson),
++          pixel: [pixels[offset + 2], pixels[offset + 1], pixels[offset]],
++          width: size.width,
++          height: size.height,
++          visible: win.isVisible(),
++          throttled: guest.getBackgroundThrottling(),
++        };
++      };
++      const handlers = new Map();
++      registerNativeBrowserBridgeIpc({ handle: (channel, handler) => handlers.set(channel, handler) }, {
++        getGuest: (id, host) => id === "background" && host === win.webContents.id ? guest : null,
++        getWorkspaceId: () => "workspace",
++        images: nativeImage,
++      });
++      const native = (channel, input = {}) => handlers.get("paseo:browser:native-" + channel)(
++        { sender: win.webContents }, { browserId: "background", workspaceId: "workspace", ...input },
++      );
++      global.captureHighDpi = async () => {
++        await native("command", { method: "Emulation.setDeviceMetricsOverride", params: {
++          width: 1600, height: 1200, deviceScaleFactor: 2, mobile: false,
++        }});
++        await native("command", { method: "Runtime.evaluate", params: { expression: "scrollTo(0,0)" } });
++        await native("frame");
++        await new Promise(resolve => setTimeout(resolve, 1600));
++        const frame = await native("frame");
++        const image = nativeImage.createFromBuffer(Buffer.from(frame.data.split(",")[1], "base64"));
++        await native("command", { method: "Emulation.clearDeviceMetricsOverride" });
++        return { reported: { width: frame.width, height: frame.height }, encoded: image.getSize() };
++      };
++      global.backgroundReady = true;
++    });
++  `,
++  );
++  const env = Object.fromEntries(
++    Object.entries(process.env).filter(([key]) => key !== "ELECTRON_RUN_AS_NODE"),
++  );
++  const displayArgs =
++    process.platform === "linux" && process.env.DISPLAY ? ["--ozone-platform=x11"] : [];
++  return electron.launch({ args: ["--no-sandbox", ...displayArgs, main], env });
++}
++
++async function expectBackgroundBrowserWorks(desktop) {
++  await expect.poll(() => desktop.evaluate(() => global.backgroundReady)).toBe(true);
++  for (const color of [
++    [0, 200, 0],
++    [0, 0, 200],
++    [200, 0, 0],
++  ]) {
++    const result = await desktop.evaluate(
++      (_electron, requestedColor) => global.captureBackground(requestedColor),
++      color,
++    );
++    expect(result).toEqual({
++      text: "Background page",
++      pixel: color,
++      width: color[0] > 0 ? 800 : 1280,
++      height: color[0] > 0 ? 600 : 800,
++      visible: false,
++      throttled: true,
++    });
++  }
++}
++
+ let desktop;
+ try {
+   desktop = await launchWindowWithoutHiddenFrames();
+   await expectLoadedDesktopIsShown(desktop);
+   console.log("Loaded desktop is visible without hidden compositor frames");
++  await desktop.close();
++  desktop = await launchBackgroundBrowser();
++  await expectBackgroundBrowserWorks(desktop);
++  console.log("Never-shown browser runs animation callbacks and captures fresh pixels repeatedly");
++  expect(await desktop.evaluate(() => global.captureHighDpi())).toEqual({
++    reported: { width: 1280, height: 960 },
++    encoded: { width: 1280, height: 960 },
++  });
++  console.log(
++    "Native quiet-page capture bounds high-DPI JPEG pixels and reports encoded dimensions",
++  );
+ } finally {
+   await desktop?.close();
+   await rm(root, { recursive: true, force: true });
+diff --git a/packages/desktop/scripts/linux-sandbox/launcher.sh b/packages/desktop/scripts/linux-sandbox/launcher.sh
+index 8f0b6a6..4174f8b 100644
+--- a/packages/desktop/scripts/linux-sandbox/launcher.sh
++++ b/packages/desktop/scripts/linux-sandbox/launcher.sh
+@@ -10,6 +10,41 @@ if [ "${ELECTRON_RUN_AS_NODE:-}" = 1 ]; then
+   exec "$executable" "$@"
+ fi
+ 
++# Ozone must be selected before Electron initializes the windowing system.
++set -f
++backend_requested=false
++for arg in "$@"; do
++  case "$arg" in
++    --ozone-platform|--ozone-platform=*|--ozone-platform-hint|--ozone-platform-hint=*) backend_requested=true ;;
++  esac
++done
++backend_value_pending=false
++backend_flags=
++for flag in ${PASEO_ELECTRON_FLAGS:-}; do
++  if [ "$backend_value_pending" = true ]; then
++    backend_flags="$backend_flags $flag"
++    backend_value_pending=false
++    continue
++  fi
++  case "$flag" in
++    --ozone-platform|--ozone-platform-hint)
++      backend_flags="$backend_flags $flag"
++      backend_requested=true
++      backend_value_pending=true
++      ;;
++    --ozone-platform=*|--ozone-platform-hint=*)
++      backend_flags="$backend_flags $flag"
++      backend_requested=true
++      ;;
++  esac
++done
++if [ -n "$backend_flags" ]; then
++  set -- $backend_flags "$@"
++fi
++if [ -n "${DISPLAY:-}" ] && [ "$backend_requested" = false ]; then
++  set -- --ozone-platform=x11 "$@"
++fi
++
+ for arg in "$@"; do
+   if [ "$arg" = '--no-sandbox' ]; then
+     export PASEO_DESKTOP_SANDBOX_REASON='requested by --no-sandbox'
+@@ -19,7 +54,6 @@ for arg in "$@"; do
+ done
+ 
+ # Match main's whitespace-separated debugging flags without evaluating shell code.
+-set -f
+ for flag in ${PASEO_ELECTRON_FLAGS:-}; do
+   if [ "$flag" = '--no-sandbox' ]; then
+     export PASEO_DESKTOP_SANDBOX_REASON='requested by PASEO_ELECTRON_FLAGS'
+diff --git a/packages/desktop/src/daemon/cli/passthrough.test.ts b/packages/desktop/src/daemon/cli/passthrough.test.ts
+index e891f71..70e375a 100644
+--- a/packages/desktop/src/daemon/cli/passthrough.test.ts
++++ b/packages/desktop/src/daemon/cli/passthrough.test.ts
+@@ -35,6 +35,27 @@ describe("passthrough CLI", () => {
+     ).toBeNull();
+   });
+ 
++  it.each([
++    ["--ozone-platform=x11"],
++    ["--ozone-platform", "wayland"],
++    ["--ozone-platform-hint=auto"],
++  ])("keeps graphics arguments out of CLI passthrough (%s)", (...args) => {
++    expect(
++      parsePassthroughCliArgs({
++        argv: ["/usr/bin/Paseo", ...args],
++        isDefaultApp: false,
++        forceCli: false,
++      }),
++    ).toBeNull();
++    expect(
++      parsePassthroughCliArgs({
++        argv: ["/usr/bin/Paseo", ...args, "daemon", "status"],
++        isDefaultApp: false,
++        forceCli: false,
++      }),
++    ).toEqual(["daemon", "status"]);
++  });
++
+   it("ignores macOS GUI launch arguments", () => {
+     expect(
+       parsePassthroughCliArgs({
+@@ -45,6 +66,21 @@ describe("passthrough CLI", () => {
+     ).toBeNull();
+   });
+ 
++  it.each([
++    ["agent", "send", "ID", "--prompt", "--ozone-platform=x11 causes a blank window"],
++    ["agent", "send", "ID", "--prompt", "--ozone-platform", "wayland"],
++    ["agent", "send", "ID", "--", "--no-sandbox", "--class=example"],
++    ["--", "--ozone-platform=x11", "--ozone-platform-hint", "auto"],
++  ])("preserves command data after launcher switches (%s)", (...args) => {
++    expect(
++      parsePassthroughCliArgs({
++        argv: ["/usr/bin/Paseo", "--no-sandbox", "--ozone-platform=x11", ...args],
++        isDefaultApp: false,
++        forceCli: false,
++      }),
++    ).toEqual(args);
++  });
++
+   it("ignores --no-sandbox injected by Linux wrapper", () => {
+     expect(
+       parsePassthroughCliArgs({
+diff --git a/packages/desktop/src/daemon/cli/passthrough.ts b/packages/desktop/src/daemon/cli/passthrough.ts
+index a315601..64ec723 100644
+--- a/packages/desktop/src/daemon/cli/passthrough.ts
++++ b/packages/desktop/src/daemon/cli/passthrough.ts
+@@ -2,7 +2,15 @@ import { pathToFileURL } from "node:url";
+ import { resolvePassthroughCliEntrypoint } from "./entrypoints.js";
+ 
+ const DESKTOP_CLI_ENV = "PASEO_DESKTOP_CLI";
+-const IGNORED_ARG_PREFIXES = ["-psn_", "--class=", "--no-sandbox", "--remote-debugging-port="];
++const IGNORED_ARG_PREFIXES = [
++  "-psn_",
++  "--class=",
++  "--no-sandbox",
++  "--remote-debugging-port=",
++  "--ozone-platform=",
++  "--ozone-platform-hint=",
++];
++const BACKEND_SWITCHES = new Set(["--ozone-platform", "--ozone-platform-hint"]);
+ 
+ export type PassthroughCliRunner = (argv: string[]) => Promise<number>;
+ 
+@@ -12,14 +20,19 @@ export function parsePassthroughCliArgs(input: {
+   forceCli: boolean;
+ }): string[] | null {
+   const startIndex = input.isDefaultApp ? 2 : 1;
+-  const effective: string[] = [];
+-
+-  for (const arg of input.argv.slice(startIndex)) {
++  let index = startIndex;
++  for (; index < input.argv.length; index++) {
++    const arg = input.argv[index]!;
++    if (BACKEND_SWITCHES.has(arg)) {
++      index++;
++      continue;
++    }
+     if (IGNORED_ARG_PREFIXES.some((prefix) => arg.startsWith(prefix))) {
+       continue;
+     }
+-    effective.push(arg);
++    break;
+   }
++  const effective = input.argv.slice(index);
+ 
+   if (input.forceCli) {
+     return effective;
+diff --git a/packages/desktop/src/daemon/linux-launcher.posix.test.ts b/packages/desktop/src/daemon/linux-launcher.posix.test.ts
+index ba7a8ec..f52491a 100644
+--- a/packages/desktop/src/daemon/linux-launcher.posix.test.ts
++++ b/packages/desktop/src/daemon/linux-launcher.posix.test.ts
+@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ import { expect, test } from "vitest";
++import { parsePassthroughCliArgs } from "./cli/passthrough.js";
+ 
+ // The launcher reads Linux /proc state as well as POSIX command interfaces.
+ const it = test.runIf(process.platform === "linux");
+@@ -55,6 +56,8 @@ async function launch(
+       env: {
+         ...process.env,
+         FORCE_COLOR: undefined,
++        DISPLAY: undefined,
++        PASEO_ELECTRON_FLAGS: undefined,
+         PATH: `${commands}:${process.env.PATH}`,
+         APPIMAGE: "/tmp/Paseo.AppImage",
+         PASEO_DESKTOP_SMOKE: "0",
+@@ -121,3 +124,57 @@ it("applies a debugging environment sandbox override before Chromium starts", as
+   expect(result.args).toEqual(["--no-sandbox", ...result.input]);
+   expect(result.stderr).toContain("requested by PASEO_ELECTRON_FLAGS");
+ });
++
++it("selects X11 before Electron starts when an X display is available", async () => {
++  const result = await launch({ namespaces: true, env: { DISPLAY: ":0" } });
++  expect(result.args).toEqual(["--ozone-platform=x11", ...result.input]);
++});
++
++it.each([
++  ["--ozone-platform=wayland"],
++  ["--ozone-platform", "wayland"],
++  ["--ozone-platform-hint=auto"],
++])("preserves an explicit backend argument %s", async (...args) => {
++  const result = await launch({ namespaces: true, args, env: { DISPLAY: ":0" } });
++  expect(result.args).toEqual(args);
++});
++
++it("passes an environment backend override to Electron on argv", async () => {
++  const result = await launch({
++    namespaces: true,
++    env: { DISPLAY: ":0", PASEO_ELECTRON_FLAGS: "--ozone-platform=wayland" },
++  });
++  expect(result.args).toEqual(["--ozone-platform=wayland", ...result.input]);
++});
++
++it.each(["--ozone-platform wayland", "--ozone-platform-hint auto"])(
++  "passes separate-value environment backend arguments before startup: %s",
++  async (flags) => {
++    const result = await launch({
++      namespaces: true,
++      env: { DISPLAY: ":0", PASEO_ELECTRON_FLAGS: flags },
++    });
++    expect(result.args).toEqual([...flags.split(" "), ...result.input]);
++  },
++);
++
++it("does not add graphics flags to Node entrypoints with an X display", async () => {
++  const result = await launch({ env: { DISPLAY: ":0", ELECTRON_RUN_AS_NODE: "1" } });
++  expect(result.args).toEqual(result.input);
++});
++
++it("places environment backend switches before CLI arguments without removing prompt text", async () => {
++  const args = ["agent", "send", "ID", "--prompt", "--ozone-platform=x11 causes a blank window"];
++  const result = await launch({
++    namespaces: true,
++    args,
++    env: { DISPLAY: ":0", PASEO_ELECTRON_FLAGS: "--ozone-platform wayland" },
++  });
++  expect(
++    parsePassthroughCliArgs({
++      argv: ["/usr/bin/Paseo", ...result.args],
++      isDefaultApp: false,
++      forceCli: false,
++    }),
++  ).toEqual(args);
++});
+diff --git a/packages/desktop/src/features/browser-automation/ipc.test.ts b/packages/desktop/src/features/browser-automation/ipc.test.ts
+index 427e86e..82178dc 100644
+--- a/packages/desktop/src/features/browser-automation/ipc.test.ts
++++ b/packages/desktop/src/features/browser-automation/ipc.test.ts
+@@ -1,6 +1,6 @@
+ import { describe, expect, test, vi } from "vitest";
+ import { executeAutomationCommand, type BrowserRegistry, type TabImage } from "./service.js";
+-import { adaptWebContents, HostSnapshotEngineRegistry } from "./ipc.js";
++import { adaptWebContents as adaptContents, HostSnapshotEngineRegistry } from "./ipc.js";
+ import type { IsolatedKeyboardInputEvent } from "./trusted-input.js";
+ 
+ class FakeImage implements TabImage {
+@@ -13,6 +13,10 @@ class FakeImage implements TabImage {
+   }
+ }
+ 
++function adaptWebContents(contents: FakeWebContents) {
++  return adaptContents(contents, { decodeImage: () => new FakeImage() });
++}
++
+ class FakeDebugger {
+   public attachedProtocolVersions: string[] = [];
+   public commands: Array<{ command: string; params: Record<string, unknown> }> = [];
+@@ -61,6 +65,9 @@ class FakeDebugger {
+       }
+       return { result: { value: true } };
+     }
++    if (command === "Page.getLayoutMetrics")
++      return { cssVisualViewport: { pageX: 0, pageY: 0, clientWidth: 640, clientHeight: 480 } };
++    if (command === "Page.captureScreenshot") return { data: "iVBORw==" };
+     return { ok: true };
+   }
+ 
+@@ -87,6 +94,7 @@ class FakeDebugger {
+   public emitDetach(): void {
+     this.attachedProtocolVersions.length = 0;
+     this.detachListener?.();
++    for (const finish of this.blockedCommands.splice(0)) finish();
+   }
+ 
+   public finishNextCommand(): void {
+@@ -118,8 +126,6 @@ class FakeWebContents {
+   public readonly debugger = new FakeDebugger();
+   public readonly inputEvents: IsolatedKeyboardInputEvent[] = [];
+   public readonly loadedUrls: string[] = [];
+-  public frameListener: ((image: TabImage) => void) | null = null;
+-  public endedFrameSubscriptions = 0;
+   public readonly invalidations: string[] = [];
+   private consoleMessageListener: ConsoleMessageListener | null = null;
+   public readonly destroyedListeners = new Set<() => void>();
+@@ -172,16 +178,6 @@ class FakeWebContents {
+ 
+   public reload(): void {}
+ 
+-  public beginFrameSubscription(onlyDirty: boolean, callback: (image: TabImage) => void): void {
+-    expect(onlyDirty).toBe(false);
+-    this.frameListener = callback;
+-  }
+-
+-  public endFrameSubscription(): void {
+-    this.frameListener = null;
+-    this.endedFrameSubscriptions += 1;
+-  }
+-
+   public invalidate(): void {
+     this.invalidations.push("invalidate");
+   }
+@@ -222,7 +218,6 @@ class FakeWebContents {
+   public destroy(): void {
+     this.destroyed = true;
+     this.debugger.emitDetach();
+-    this.frameListener = null;
+     for (const listener of this.destroyedListeners) {
+       this.destroyedListeners.delete(listener);
+       listener();
+@@ -255,21 +250,29 @@ describe("browser automation IPC adapter", () => {
+     ]);
+   });
+ 
+-  test("captures one rendered frame and releases the subscription", async () => {
++  test("captures viewport pixels through CDP without waiting for another compositor paint", async () => {
+     const contents = new FakeWebContents(20);
+     const tab = adaptWebContents(contents);
+     const controller = new AbortController();
+     const capture = tab.captureFrame(controller.signal);
+-    contents.frameListener?.(new FakeImage());
+-
+     expect((await capture).getSize()).toEqual({ width: 640, height: 480 });
+-    expect(contents.frameListener).toBeNull();
++    expect(contents.debugger.commands).toEqual([
++      { command: "Page.getLayoutMetrics", params: {} },
++      {
++        command: "Page.captureScreenshot",
++        params: {
++          format: "png",
++          captureBeyondViewport: true,
++          clip: { x: 0, y: 0, width: 640, height: 480, scale: 1 },
++        },
++      },
++    ]);
+     controller.abort();
+-    expect(contents.endedFrameSubscriptions).toBe(1);
+   });
+ 
+-  test("cancels a pending frame subscription when the capture budget expires", async () => {
++  test("cancels a pending capture when its budget expires", async () => {
+     const contents = new FakeWebContents(2001);
++    contents.debugger.blockCommands = true;
+     const tab = adaptWebContents(contents);
+     const controller = new AbortController();
+     const capture = tab.captureFrame(controller.signal);
+@@ -277,14 +280,35 @@ describe("browser automation IPC adapter", () => {
+     controller.abort(new Error("capture deadline"));
+ 
+     await failure;
+-    expect(contents.frameListener).toBeNull();
+-    expect(contents.endedFrameSubscriptions).toBe(1);
++    expect(contents.destroyedListeners.size).toBe(1);
++  });
++
++  test("a cancelled screenshot does not block subsequent CDP commands", async () => {
++    const contents = new FakeWebContents(2004);
++    contents.debugger.blockedCommandNames.add("Page.captureScreenshot");
++    const tab = adaptWebContents(contents);
++    const controller = new AbortController();
++    const captured = tab.captureFrame(controller.signal);
++    await flushMicrotasks();
++    const failure = expect(captured).rejects.toThrow("capture deadline");
++    controller.abort(new Error("capture deadline"));
++    await failure;
++    let completed = false;
++    const next = tab.sendDebugCommand!("Runtime.enable").then((result) => {
++      completed = true;
++      return result;
++    });
++    await flushMicrotasks();
++    expect(completed).toBe(true);
++    contents.debugger.finishNextCommand();
++    await next;
+   });
+ 
+   test("closing a guest settles its screenshot and releases the next queued capture", async () => {
+     vi.useFakeTimers();
+     try {
+       const closing = new FakeWebContents(2002);
++      closing.debugger.blockedCommandNames.add("Page.captureScreenshot");
+       const next = new FakeWebContents(2003);
+       const tabs = new Map([
+         ["closing", adaptWebContents(closing)],
+@@ -313,7 +337,7 @@ describe("browser automation IPC adapter", () => {
+       });
+       const nextCapture = capture("next");
+       await vi.advanceTimersByTimeAsync(0);
+-      expect(closing.frameListener).not.toBeNull();
++      expect(closedResult).toBeUndefined();
+       closing.destroy();
+       await vi.advanceTimersByTimeAsync(0);
+       expect(closedResult).toEqual({
+@@ -326,8 +350,6 @@ describe("browser automation IPC adapter", () => {
+         },
+       });
+       expect(closing.destroyedListeners.size).toBe(0);
+-      expect(next.frameListener).not.toBeNull();
+-      next.frameListener?.(new FakeImage());
+       await expect(nextCapture).resolves.toMatchObject({ ok: true });
+       await closedCapture;
+       expect(next.destroyedListeners.size).toBe(1);
+@@ -371,7 +393,7 @@ describe("browser automation IPC adapter", () => {
+       format: "png",
+     });
+ 
+-    expect(result).toEqual({ ok: true });
++    expect(result).toEqual({ data: "iVBORw==" });
+     expect(contents.debugger.attachedProtocolVersions).toEqual(["1.3"]);
+     expect(contents.debugger.commands).toEqual([
+       { command: "Page.captureScreenshot", params: { format: "png" } },
+@@ -401,7 +423,7 @@ describe("browser automation IPC adapter", () => {
+ 
+     contents.debugger.finishNextCommand();
+     await expect(first).resolves.toEqual({ ok: true });
+-    await expect(second).resolves.toEqual({ ok: true });
++    await expect(second).resolves.toEqual({ data: "iVBORw==" });
+   });
+ 
+   test("handles JavaScript dialogs through the per-tab CDP queue", async () => {
 diff --git a/packages/desktop/src/features/browser-automation/ipc.ts b/packages/desktop/src/features/browser-automation/ipc.ts
-index 18e5b84..03e2663 100644
+index 18e5b84..5053f59 100644
 --- a/packages/desktop/src/features/browser-automation/ipc.ts
 +++ b/packages/desktop/src/features/browser-automation/ipc.ts
-@@ -1,4 +1,5 @@
- import { ipcMain } from "electron";
+@@ -1,4 +1,7 @@
+-import { ipcMain } from "electron";
++import { ipcMain, nativeImage } from "electron";
++import { z } from "zod";
++import type { CdpCommandSender } from "./cdp-session-queue.js";
 +import { registerNativeBrowserBridgeIpc } from "./native-bridge.js";
  import { BrowserAutomationExecuteRequestSchema } from "@getpaseo/protocol/browser-automation/rpc-schemas";
  import type {
    BrowserAutomationConsoleLogEntry,
-@@ -450,6 +451,7 @@ function createRegistry(hostWebContentsId: number): BrowserRegistry {
+@@ -105,8 +108,6 @@ interface BrowserAutomationWebContents extends ConsoleMessageEmitter {
+   goBack(): void;
+   goForward(): void;
+   reload(): void;
+-  beginFrameSubscription(onlyDirty: boolean, callback: (image: TabImage) => void): void;
+-  endFrameSubscription(): void;
+   invalidate(): void;
+   getBackgroundThrottling(): boolean;
+   setBackgroundThrottling(allowed: boolean): void;
+@@ -114,11 +115,24 @@ interface BrowserAutomationWebContents extends ConsoleMessageEmitter {
+   insertText(text: string): Promise<void>;
+ }
+ 
+-export function adaptWebContents(contents: BrowserAutomationWebContents): TabContents {
++interface BrowserAutomationAdapters {
++  decodeImage(buffer: Buffer): TabImage;
++}
++
++export function adaptWebContents(
++  contents: BrowserAutomationWebContents,
++  {
++    decodeImage = (buffer) => nativeImage.createFromBuffer(buffer),
++  }: Partial<BrowserAutomationAdapters> = {},
++): TabContents {
+   const contentsId = contents.id;
+   observeConsoleMessages(contents, contentsId);
+   const cdpQueue = getCdpQueue(contentsId);
+   const dialogMonitor = getDialogMonitor(contents, contentsId, cdpQueue);
++  const sendCommand: CdpCommandSender = (command, params) => {
++    if (!contents.debugger.isAttached()) contents.debugger.attach("1.3");
++    return contents.debugger.sendCommand(command, params ?? {});
++  };
+   return {
+     id: contentsId,
+     getURL: () => contents.getURL(),
+@@ -132,7 +146,7 @@ export function adaptWebContents(contents: BrowserAutomationWebContents): TabCon
+     goBack: () => contents.goBack(),
+     goForward: () => contents.goForward(),
+     reload: () => contents.reload(),
+-    captureFrame: (signal) => captureViewportFrame(contents, signal),
++    captureFrame: (signal) => captureViewportFrame({ contents, signal, sendCommand, decodeImage }),
+     invalidate: () => contents.invalidate(),
+     withFrameProduction: async (capture) => {
+       const previous = contents.getBackgroundThrottling();
+@@ -147,26 +161,37 @@ export function adaptWebContents(contents: BrowserAutomationWebContents): TabCon
+     insertText: (text) => contents.insertText(text),
+     getConsoleMessages: () => consoleMessagesByContentsId.get(contentsId) ?? [],
+     captureDialogs: (task) => dialogMonitor.capture(task),
+-    sendDebugCommand: (command: string, params?: Record<string, unknown>) =>
+-      cdpQueue.run(async () => {
+-        if (!contents.debugger.isAttached()) {
+-          contents.debugger.attach("1.3");
+-        }
+-        return contents.debugger.sendCommand(command, params ?? {});
+-      }),
++    sendDebugCommand: (command, params) => cdpQueue.run(() => sendCommand(command, params)),
+   };
+ }
+ 
+-function captureViewportFrame(
+-  contents: BrowserAutomationWebContents,
+-  signal: AbortSignal,
+-): Promise<TabImage> {
++const ViewportMetricsSchema = z.object({
++  cssVisualViewport: z.object({
++    pageX: z.number().finite(),
++    pageY: z.number().finite(),
++    clientWidth: z.number().positive(),
++    clientHeight: z.number().positive(),
++  }),
++});
++const ViewportScreenshotSchema = z.object({ data: z.string().min(1) });
++
++interface ViewportCaptureOptions extends BrowserAutomationAdapters {
++  contents: BrowserAutomationWebContents;
++  signal: AbortSignal;
++  sendCommand: CdpCommandSender;
++}
++
++function captureViewportFrame({
++  contents,
++  signal,
++  sendCommand,
++  decodeImage,
++}: ViewportCaptureOptions): Promise<TabImage> {
+   signal.throwIfAborted();
+   return new Promise((resolve, reject) => {
+     const stop = () => {
+       signal.removeEventListener("abort", abort);
+       contents.removeListener("destroyed", destroyed);
+-      if (!contents.isDestroyed()) contents.endFrameSubscription();
+     };
+     const abort = () => {
+       stop();
+@@ -178,17 +203,37 @@ function captureViewportFrame(
+     };
+     signal.addEventListener("abort", abort, { once: true });
+     contents.once("destroyed", destroyed);
+-    try {
+-      // A resized resident guest can paint while capturePage's surface-copy
+-      // request remains pending. Subscribe to its rendered frames instead.
+-      contents.beginFrameSubscription(false, (image) => {
++    const capture = async () => {
++      const { cssVisualViewport: viewport } = ViewportMetricsSchema.parse(
++        await sendCommand("Page.getLayoutMetrics"),
++      );
++      signal.throwIfAborted();
++      const screenshot = ViewportScreenshotSchema.parse(
++        await sendCommand("Page.captureScreenshot", {
++          format: "png",
++          captureBeyondViewport: true,
++          clip: {
++            x: viewport.pageX,
++            y: viewport.pageY,
++            width: viewport.clientWidth,
++            height: viewport.clientHeight,
++            scale: 1,
++          },
++        }),
++      );
++      signal.throwIfAborted();
++      return decodeImage(Buffer.from(screenshot.data, "base64"));
++    };
++    void capture().then(
++      (image) => {
+         stop();
+-        resolve(image);
+-      });
+-    } catch (error) {
+-      stop();
+-      reject(error);
+-    }
++        return resolve(image);
++      },
++      (error) => {
++        stop();
++        return reject(error);
++      },
++    );
+   });
+ }
+ 
+@@ -450,6 +495,11 @@ function createRegistry(hostWebContentsId: number): BrowserRegistry {
  
  export function registerBrowserAutomationIpc(options?: { ipc?: IpcHandlerRegistry }): void {
    const ipc = options?.ipc ?? ipcMain;
-+  registerNativeBrowserBridgeIpc(ipc);
++  registerNativeBrowserBridgeIpc(ipc, {
++    getGuest: getPaseoBrowserWebContentsForHostWindow,
++    getWorkspaceId: getPaseoBrowserWorkspaceId,
++    images: nativeImage,
++  });
  
    ipc.handle("paseo:browser:execute-automation-command", async (event, rawRequest: unknown) => {
      const hostContents = (event as { sender?: HostWebContents }).sender;
+diff --git a/packages/desktop/src/features/browser-automation/native-bridge.test.ts b/packages/desktop/src/features/browser-automation/native-bridge.test.ts
+new file mode 100644
+index 0000000..b7e608e
+--- /dev/null
++++ b/packages/desktop/src/features/browser-automation/native-bridge.test.ts
+@@ -0,0 +1,347 @@
++import { EventEmitter } from "node:events";
++import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
++import {
++  registerNativeBrowserBridgeIpc,
++  type NativeBrowserContents,
++  type NativeBrowserImage,
++} from "./native-bridge.js";
++
++class Image implements NativeBrowserImage {
++  constructor(private dimensions: { width: number; height: number }) {}
++  getSize() {
++    return this.dimensions;
++  }
++  toBitmap() {
++    return Buffer.alloc(this.dimensions.width * this.dimensions.height * 4);
++  }
++  toJPEG() {
++    return Buffer.from(JSON.stringify(this.dimensions));
++  }
++  resize(dimensions: { width: number; height: number }) {
++    return new Image(dimensions);
++  }
++}
++
++class GuestDebugger extends EventEmitter {
++  private attached = false;
++  public attach() {
++    this.attached = true;
++  }
++  public isAttached() {
++    return this.attached;
++  }
++  public sendCommand = vi.fn(
++    async (method: string, _params: Record<string, unknown>): Promise<unknown> => {
++      if (method === "Page.getLayoutMetrics")
++        return {
++          cssVisualViewport: { pageX: 320, pageY: 1800, clientWidth: 1600, clientHeight: 1200 },
++        };
++      if (method === "Page.captureScreenshot")
++        return { data: Buffer.from("fresh jpeg").toString("base64") };
++      if (method === "Target.getTargetInfo")
++        return { targetInfo: { targetId: "own-target", browserContextId: "own-context" } };
++      return {};
++    },
++  );
++}
++class Guest extends EventEmitter implements NativeBrowserContents {
++  public readonly debugger = new GuestDebugger();
++  public destroyed = false;
++  public throttled = true;
++  public constructor(public readonly id: number) {
++    super();
++  }
++  public isDestroyed() {
++    return this.destroyed;
++  }
++  public getBackgroundThrottling() {
++    return this.throttled;
++  }
++  public setBackgroundThrottling(value: boolean) {
++    this.throttled = value;
++  }
++}
++const identity = { browserId: "browser", workspaceId: "workspace" };
++function fixture(imageSize = { width: 1280, height: 960 }) {
++  const host = new Guest(1);
++  const guest = new Guest(2);
++  const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>();
++  registerNativeBrowserBridgeIpc(
++    {
++      handle: (channel, handler) => {
++        handlers.set(channel, handler);
++      },
++    },
++    {
++      getGuest: (browserId, hostId) =>
++        browserId === identity.browserId && hostId === host.id ? guest : null,
++      getWorkspaceId: (browserId) =>
++        browserId === identity.browserId ? identity.workspaceId : null,
++      images: {
++        createFromBuffer() {
++          return new Image(imageSize);
++        },
++        createFromBitmap(_buffer, dimensions) {
++          return new Image(dimensions);
++        },
++      },
++    },
++  );
++  const call = async (channel: string, input: Record<string, unknown> = {}, sender = host) => {
++    const handler = handlers.get(`paseo:browser:native-${channel}`);
++    if (!handler) throw Error("Missing native IPC handler");
++    return handler({ sender }, { ...identity, ...input });
++  };
++  return { host, guest, call };
++}
++beforeEach(() => {
++  vi.useFakeTimers();
++  vi.setSystemTime(10000);
++});
++afterEach(() => {
++  vi.useRealTimers();
++});
++
++describe("native browser IPC", () => {
++  test("inspects paused call frames before resuming the original Runtime command", async () => {
++    const { guest, call } = fixture();
++    const running = Promise.withResolvers<unknown>();
++    const started = Promise.withResolvers<void>();
++    guest.debugger.sendCommand.mockImplementation(async (method) => {
++      if (method === "Runtime.evaluate") {
++        started.resolve();
++        return running.promise;
++      }
++      if (method === "Debugger.evaluateOnCallFrame") return { result: { value: 42 } };
++      if (method === "Runtime.getProperties")
++        return { result: [{ name: "local", value: { value: 42 } }] };
++      if (method === "Debugger.resume") running.resolve({ result: { value: "done" } });
++      return {};
++    });
++    const evaluating = call("command", { method: "Runtime.evaluate" });
++    await started.promise;
++    await expect(
++      call("command", {
++        method: "Debugger.evaluateOnCallFrame",
++        params: { callFrameId: "frame", expression: "local" },
++      }),
++    ).resolves.toEqual({ result: { value: 42 } });
++    await expect(
++      call("command", { method: "Runtime.getProperties", params: { objectId: "scope" } }),
++    ).resolves.toEqual({ result: [{ name: "local", value: { value: 42 } }] });
++    await call("command", { method: "Debugger.resume" });
++    await expect(evaluating).resolves.toEqual({ result: { value: "done" } });
++  });
++
++  test("captures a fresh bounded image when a quiet page has no new screencast paints", async () => {
++    const { guest, call } = fixture();
++    const first = await call("frame");
++    expect(first).toEqual({
++      data: `data:image/jpeg;base64,${Buffer.from("fresh jpeg").toString("base64")}`,
++      width: 1280,
++      height: 960,
++      capturedAt: 10000,
++    });
++    expect(guest.debugger.sendCommand).toHaveBeenLastCalledWith("Page.captureScreenshot", {
++      format: "jpeg",
++      quality: 65,
++      fromSurface: true,
++      captureBeyondViewport: false,
++      clip: { x: 320, y: 1800, width: 1600, height: 1200, scale: 0.8 },
++    });
++    await vi.advanceTimersByTimeAsync(1600);
++    const next = await call("frame", { notBefore: 11000 });
++    expect(next).toEqual({
++      data: `data:image/jpeg;base64,${Buffer.from("fresh jpeg").toString("base64")}`,
++      width: 1280,
++      height: 960,
++      capturedAt: 11600,
++    });
++    expect(
++      guest.debugger.sendCommand.mock.calls.filter(
++        ([method]) => method === "Page.captureScreenshot",
++      ),
++    ).toHaveLength(2);
++  });
++  test("refuses requests from another host or workspace before reaching the debugger", async () => {
++    const { guest, call } = fixture();
++    await expect(call("command", { method: "DOM.getDocument" }, new Guest(9))).rejects.toThrow(
++      /host window and workspace/,
++    );
++    await expect(call("events", { workspaceId: "elsewhere" })).rejects.toThrow(
++      /host window and workspace/,
++    );
++    await expect(call("frame", { browserId: "missing" })).rejects.toThrow(
++      /host window and workspace/,
++    );
++    await expect(call("command", { method: "invalid" })).rejects.toThrow();
++    expect(guest.debugger.sendCommand).not.toHaveBeenCalled();
++  });
++
++  test("bounds high-DPI screenshots and reports the final encoded pixel dimensions", async () => {
++    const { guest, call } = fixture({ width: 3200, height: 2400 });
++    const send = guest.debugger.sendCommand.getMockImplementation()!;
++    guest.debugger.sendCommand.mockImplementation(async (method, params) => {
++      if (method === "Page.getLayoutMetrics")
++        return { cssVisualViewport: { pageX: 0, pageY: 0, clientWidth: 800, clientHeight: 600 } };
++      if (method === "Page.captureScreenshot")
++        return { data: Buffer.alloc(900_000, 1).toString("base64") };
++      return send(method, params);
++    });
++    const dimensions = { width: 1280, height: 960 };
++    await expect(call("frame")).resolves.toEqual({
++      ...dimensions,
++      data: `data:image/jpeg;base64,${Buffer.from(JSON.stringify(dimensions)).toString("base64")}`,
++      capturedAt: 10000,
++    });
++  });
++
++  test("finishes a still capture before changing viewport while allowing unblockers through", async () => {
++    const { guest, call } = fixture();
++    const screenshot = Promise.withResolvers<unknown>();
++    const started = Promise.withResolvers<void>();
++    const send = guest.debugger.sendCommand.getMockImplementation()!;
++    guest.debugger.sendCommand.mockImplementation(async (method, params) => {
++      if (method === "Page.captureScreenshot") {
++        started.resolve();
++        return screenshot.promise;
++      }
++      return send(method, params);
++    });
++    const capturing = call("frame");
++    await started.promise;
++    const params = { width: 800, height: 600, deviceScaleFactor: 2, mobile: true };
++    const emulating = call("command", { method: "Emulation.setDeviceMetricsOverride", params });
++    await call("command", { method: "Page.handleJavaScriptDialog", params: { accept: false } });
++    expect(guest.debugger.sendCommand).not.toHaveBeenCalledWith(
++      "Emulation.setDeviceMetricsOverride",
++      params,
++    );
++    screenshot.resolve({ data: Buffer.from("fresh jpeg").toString("base64") });
++    await capturing;
++    await emulating;
++    expect(guest.debugger.sendCommand).toHaveBeenLastCalledWith(
++      "Emulation.setDeviceMetricsOverride",
++      params,
++    );
++  });
++
++  test("restricts browser-wide commands and maps cookies and permissions to the registered guest", async () => {
++    const { guest, call } = fixture();
++    await expect(call("command", { method: "Browser.close" })).rejects.toThrow(
++      /outside the native guest/,
++    );
++    await expect(call("command", { method: "Target.attachToTarget" })).rejects.toThrow(/tab tools/);
++    await expect(
++      call("command", { method: "Storage.getCookies", params: { browserContextId: "foreign" } }),
++    ).rejects.toThrow(/outside the native guest/);
++    await expect(
++      call("command", {
++        method: "Runtime.evaluate",
++        params: { expression: "x".repeat(2 * 1024 * 1024) },
++      }),
++    ).rejects.toThrow(/size limit/);
++    expect(guest.debugger.sendCommand).not.toHaveBeenCalled();
++    await expect(call("command", { method: "Target.getTargets" })).resolves.toEqual({
++      targetInfos: [{ targetId: "own-target", browserContextId: "own-context" }],
++    });
++    await expect(
++      call("command", { method: "Target.getTargetInfo", params: { targetId: "foreign" } }),
++    ).rejects.toThrow(/outside this native browser/);
++    await call("command", { method: "Storage.getCookies" });
++    expect(guest.debugger.sendCommand).toHaveBeenLastCalledWith("Network.getAllCookies", {});
++    await call("command", {
++      method: "Browser.grantPermissions",
++      params: { permissions: ["geolocation"] },
++    });
++    expect(guest.debugger.sendCommand).toHaveBeenLastCalledWith("Browser.grantPermissions", {
++      permissions: ["geolocation"],
++      browserContextId: "own-context",
++    });
++  });
++
++  test("bounds buffered events and drains only matching events", async () => {
++    const { guest, call } = fixture();
++    await call("command", { method: "Network.enable" });
++    for (let index = 0; index < 260; index++)
++      guest.debugger.emit("message", {}, "Network.requestWillBeSent", { index });
++    guest.debugger.emit("message", {}, "Debugger.paused", { reason: "other" });
++    await expect(call("events", { method: "Debugger.paused", clear: false })).resolves.toEqual({
++      events: [{ method: "Debugger.paused", params: { reason: "other" } }],
++      dropped: 5,
++    });
++    await expect(call("events", { method: "Network.requestWillBeSent" })).resolves.toEqual({
++      events: Array.from({ length: 255 }, (_, index) => ({
++        method: "Network.requestWillBeSent",
++        params: { index: index + 5 },
++      })),
++      dropped: 5,
++    });
++    await expect(call("events")).resolves.toEqual({
++      events: [{ method: "Debugger.paused", params: { reason: "other" } }],
++      dropped: 0,
++    });
++    await expect(call("events")).resolves.toEqual({ events: [], dropped: 0 });
++  });
++
++  test("renews capture demand and restores guest and host throttling after the final viewer stops", async () => {
++    const { host, guest, call } = fixture();
++    await call("frame");
++    expect(host.throttled).toBe(false);
++    expect(guest.throttled).toBe(false);
++    await vi.advanceTimersByTimeAsync(1000);
++    await call("frame");
++    await vi.advanceTimersByTimeAsync(2499);
++    expect(host.throttled).toBe(false);
++    await vi.advanceTimersByTimeAsync(1);
++    expect(host.throttled).toBe(true);
++    expect(guest.throttled).toBe(true);
++    expect(guest.debugger.sendCommand).toHaveBeenLastCalledWith("Page.stopScreencast");
++    expect(vi.getTimerCount()).toBe(0);
++  });
++
++  test("cleans up capture on detach and guest destruction", async () => {
++    const { host, guest, call } = fixture();
++    await call("frame");
++    guest.debugger.emit("detach");
++    expect(host.throttled).toBe(true);
++    expect(guest.throttled).toBe(true);
++    expect(vi.getTimerCount()).toBe(0);
++    await vi.advanceTimersByTimeAsync(1000);
++    await call("frame");
++    guest.destroyed = true;
++    guest.emit("destroyed");
++    expect(host.throttled).toBe(true);
++    expect(vi.getTimerCount()).toBe(0);
++    await expect(call("command", { method: "DOM.getDocument" })).rejects.toThrow(/closed/);
++  });
++
++  test("restores throttling if capture setup fails and permits a subsequent attempt", async () => {
++    const { host, guest, call } = fixture();
++    guest.debugger.sendCommand.mockRejectedValueOnce(new Error("capture unavailable"));
++    await expect(call("frame")).rejects.toThrow("capture unavailable");
++    expect(host.throttled).toBe(true);
++    expect(guest.throttled).toBe(true);
++    expect(vi.getTimerCount()).toBe(0);
++    await expect(call("frame")).resolves.toMatchObject({ capturedAt: 10000 });
++  });
++  test("discards a pending still screenshot if the guest navigates before it completes", async () => {
++    const { guest, call } = fixture();
++    const screenshot = Promise.withResolvers<unknown>();
++    const started = Promise.withResolvers<void>();
++    guest.debugger.sendCommand.mockImplementation(async (method) => {
++      if (method === "Page.getLayoutMetrics")
++        return { cssVisualViewport: { pageX: 0, pageY: 0, clientWidth: 800, clientHeight: 600 } };
++      if (method === "Page.captureScreenshot") {
++        started.resolve();
++        return screenshot.promise;
++      }
++      return {};
++    });
++    const capturing = call("frame");
++    await started.promise;
++    guest.emit("did-start-navigation", {}, "https://next.test", false, true);
++    screenshot.resolve({ data: Buffer.from("old page").toString("base64") });
++    await expect(capturing).resolves.toBeNull();
++  });
++});
 diff --git a/packages/desktop/src/features/browser-automation/native-bridge.ts b/packages/desktop/src/features/browser-automation/native-bridge.ts
 new file mode 100644
-index 0000000..6e272e3
+index 0000000..ba69dd3
 --- /dev/null
 +++ b/packages/desktop/src/features/browser-automation/native-bridge.ts
-@@ -0,0 +1,338 @@
-+import { ipcMain, nativeImage, type WebContents } from "electron";
+@@ -0,0 +1,455 @@
 +import {
-+  getPaseoBrowserWebContentsForHostWindow,
-+  getPaseoBrowserWorkspaceId,
-+} from "../browser-webviews/index.js";
++  NativeBrowserFrameRequestSchema,
++  NativeBrowserCommandRequestSchema,
++  NativeBrowserEventsRequestSchema,
++} from "@getpaseo/protocol/browser-native";
++import type { WebContents, NativeImage } from "electron";
++import type { NativeBrowserEvent, NativeBrowserFrame } from "@getpaseo/protocol/browser-native";
 +
-+interface NativeEvent {
-+  method: string;
-+  params: Record<string, unknown>;
-+  sessionId?: string;
++export interface NativeBrowserContents extends Pick<
++  WebContents,
++  "id" | "isDestroyed" | "getBackgroundThrottling" | "setBackgroundThrottling" | "on" | "once"
++> {
++  debugger: Pick<WebContents["debugger"], "on" | "attach" | "isAttached" | "sendCommand">;
 +}
++
++export interface NativeBrowserImage extends Pick<NativeImage, "getSize" | "toBitmap" | "toJPEG"> {
++  resize(options: { width: number; height: number }): NativeBrowserImage;
++}
++
++export interface NativeBrowserBridgeDependencies {
++  getGuest(browserId: string, hostId: number): NativeBrowserContents | null;
++  getWorkspaceId(browserId: string): string | null;
++  images: {
++    createFromBuffer(buffer: Buffer): NativeBrowserImage;
++    createFromBitmap(buffer: Buffer, size: { width: number; height: number }): NativeBrowserImage;
++  };
++}
++
 +interface Capture {
 +  tail: Promise<unknown>;
-+  events: NativeEvent[];
++  events: NativeBrowserEvent[];
 +  bytes: number;
 +  dropped: number;
 +  rawFrame: { data: string; sessionId: number; metadata: { timestamp?: number } } | null;
 +  acknowledgements: Set<number>;
-+  frame: { data: string; width: number; height: number; capturedAt: number } | null;
++  frame: NativeBrowserFrame | null;
 +  streaming: boolean;
-+  demandedAt: number;
++  generation: number;
++  stillTask: Promise<void> | null;
++  lastStillAttemptAt: number;
 +  notBefore: number;
 +  previousThrottling: boolean | null;
-+  host: WebContents | null;
++  host: NativeBrowserContents | null;
 +  stopTimer: ReturnType<typeof setTimeout> | null;
 +}
 +const MAX_EVENTS = 256;
 +const MAX_EVENT_BYTES = 2 * 1024 * 1024;
-+const captures = new WeakMap<WebContents, Capture>();
-+const hostDemand = new WeakMap<WebContents, { guests: Set<WebContents>; previous: boolean }>();
-+function keepHostActive(host: WebContents, guest: WebContents) {
++const contextMethods = new Set([
++  "Browser.grantPermissions",
++  "Browser.resetPermissions",
++  "Browser.setPermission",
++  "Browser.setDownloadBehavior",
++]);
++const cookies: Record<string, string> = {
++  "Storage.getCookies": "Network.getAllCookies",
++  "Storage.setCookies": "Network.setCookies",
++  "Storage.clearCookies": "Network.clearBrowserCookies",
++};
++// A pending Runtime command can wait for a dialog reply or debugger resume.
++// Queueing its unblocker behind it would leave the guest permanently paused.
++const unblockers = new Set([
++  "Page.handleJavaScriptDialog",
++  "Debugger.evaluateOnCallFrame",
++  "Debugger.getScriptSource",
++  "Runtime.getProperties",
++  "Debugger.resume",
++  "Debugger.stepInto",
++  "Debugger.stepOut",
++  "Debugger.stepOver",
++  "Debugger.disable",
++  "Runtime.terminateExecution",
++  "Runtime.runIfWaitingForDebugger",
++  "Fetch.continueRequest",
++  "Fetch.continueResponse",
++  "Fetch.fulfillRequest",
++  "Fetch.failRequest",
++  "Fetch.continueWithAuth",
++  "Fetch.disable",
++]);
++const captures = new WeakMap<NativeBrowserContents, Capture>();
++const hostDemand = new WeakMap<
++  NativeBrowserContents,
++  { guests: Set<NativeBrowserContents>; previous: boolean }
++>();
++function keepHostActive(host: NativeBrowserContents, guest: NativeBrowserContents) {
 +  let demand = hostDemand.get(host);
 +  if (!demand) {
 +    demand = { guests: new Set(), previous: host.getBackgroundThrottling() };
@@ -61,7 +1309,7 @@ index 0000000..6e272e3
 +  }
 +  demand.guests.add(guest);
 +}
-+function releaseHost(capture: Capture, guest: WebContents) {
++function releaseHost(capture: Capture, guest: NativeBrowserContents) {
 +  const host = capture.host;
 +  if (!host) return;
 +  capture.host = null;
@@ -74,7 +1322,7 @@ index 0000000..6e272e3
 +  }
 +}
 +
-+function observe(contents: WebContents): Capture {
++function observe(contents: NativeBrowserContents): Capture {
 +  const existing = captures.get(contents);
 +  if (existing) return existing;
 +  const capture: Capture = {
@@ -86,7 +1334,9 @@ index 0000000..6e272e3
 +    rawFrame: null,
 +    acknowledgements: new Set(),
 +    streaming: false,
-+    demandedAt: 0,
++    generation: 0,
++    stillTask: null,
++    lastStillAttemptAt: -Infinity,
 +    notBefore: 0,
 +    previousThrottling: null,
 +    host: null,
@@ -131,15 +1381,20 @@ index 0000000..6e272e3
 +  });
 +  contents.on("did-start-navigation", (_event, _url, _inPlace, isMainFrame) => {
 +    if (isMainFrame) {
++      capture.generation++;
 +      capture.frame = null;
 +      capture.notBefore = Date.now() + 50;
 +    }
 +  });
 +  contents.on("did-navigate", () => {
++    capture.generation++;
 +    capture.frame = null;
 +    capture.notBefore = Date.now() + 50;
 +  });
 +  contents.debugger.on("detach", () => {
++    capture.generation++;
++    capture.rawFrame = null;
++    capture.acknowledgements.clear();
 +    if (capture.stopTimer) clearTimeout(capture.stopTimer);
 +    capture.stopTimer = null;
 +    capture.streaming = false;
@@ -150,6 +1405,7 @@ index 0000000..6e272e3
 +    releaseHost(capture, contents);
 +  });
 +  contents.once("destroyed", () => {
++    capture.generation++;
 +    if (capture.stopTimer) clearTimeout(capture.stopTimer);
 +    releaseHost(capture, contents);
 +    capture.events = [];
@@ -158,27 +1414,20 @@ index 0000000..6e272e3
 +  return capture;
 +}
 +
-+function resolveGuest(sender: WebContents, input: Record<string, unknown>): WebContents {
-+  if (typeof input.browserId !== "string" || typeof input.workspaceId !== "string") {
-+    throw new Error("Native browser and workspace IDs are required");
-+  }
-+  const contents = getPaseoBrowserWebContentsForHostWindow(input.browserId, sender.id);
-+  if (!contents || getPaseoBrowserWorkspaceId(input.browserId) !== input.workspaceId) {
-+    throw new Error("Native browser does not belong to this host window and workspace");
-+  }
-+  return contents;
-+}
-+
 +interface NativeIpcRegistry {
 +  handle(channel: string, listener: (event: unknown, ...args: unknown[]) => unknown): void;
 +}
-+function hostSender(event: unknown): WebContents {
-+  const contents = (event as { sender?: WebContents })?.sender;
++function hostSender(event: unknown): NativeBrowserContents {
++  const contents = (event as { sender?: NativeBrowserContents })?.sender;
 +  if (!contents || typeof contents.id !== "number")
 +    throw new Error("Native CDP requires a host window");
 +  return contents;
 +}
-+function consumeNativeFrame(contents: WebContents, capture: Capture): void {
++function consumeNativeFrame(
++  contents: NativeBrowserContents,
++  capture: Capture,
++  images: NativeBrowserBridgeDependencies["images"],
++): void {
 +  const rawFrame = capture.rawFrame;
 +  capture.rawFrame = null;
 +  for (const sessionId of capture.acknowledgements)
@@ -189,7 +1438,7 @@ index 0000000..6e272e3
 +    typeof rawFrame.metadata.timestamp === "number" &&
 +    rawFrame.metadata.timestamp * 1000 > capture.notBefore
 +  ) {
-+    const image = nativeImage.createFromBuffer(Buffer.from(rawFrame.data, "base64"));
++    const image = images.createFromBuffer(Buffer.from(rawFrame.data, "base64"));
 +    const dimensions = image.getSize();
 +    if (
 +      dimensions.width > 0 &&
@@ -209,7 +1458,7 @@ index 0000000..6e272e3
 +        pixels[index + 2] = Math.min(255, pixels[index + 2]! + white);
 +        pixels[index + 3] = 255;
 +      }
-+      const data = nativeImage.createFromBitmap(pixels, dimensions).toJPEG(65).toString("base64");
++      const data = images.createFromBitmap(pixels, dimensions).toJPEG(65).toString("base64");
 +      if (data.length <= 1_099_900)
 +        capture.frame = {
 +          data: "data:image/jpeg;base64," + data,
@@ -220,12 +1469,77 @@ index 0000000..6e272e3
 +  }
 +}
 +
-+export function registerNativeBrowserBridgeIpc(ipc: NativeIpcRegistry = ipcMain): void {
++async function captureStillFrame(
++  contents: NativeBrowserContents,
++  capture: Capture,
++  captureImages: NativeBrowserBridgeDependencies["images"],
++): Promise<void> {
++  const generation = capture.generation;
++  const capturedAt = Date.now();
++  const metrics = await contents.debugger.sendCommand("Page.getLayoutMetrics");
++  const {
++    pageX: x,
++    pageY: y,
++    clientWidth: width,
++    clientHeight: height,
++  } = metrics.cssVisualViewport;
++  if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0)
++    throw new Error("Native guest viewport is unavailable");
++  const scale = Math.min(1, 1280 / width, 960 / height);
++  const result = await contents.debugger.sendCommand("Page.captureScreenshot", {
++    format: "jpeg",
++    quality: 65,
++    fromSurface: true,
++    captureBeyondViewport: false,
++    clip: { x, y, width, height, scale },
++  });
++  if (contents.isDestroyed() || capture.generation !== generation) return;
++  if (
++    typeof result.data !== "string" ||
++    !/^[A-Za-z0-9+/=]+$/.test(result.data) ||
++    result.data.length > 8_000_000
++  )
++    throw new Error("Native screenshot is invalid or exceeds the decode size limit");
++  let image = captureImages.createFromBuffer(Buffer.from(result.data, "base64"));
++  const dimensions = image.getSize();
++  if (dimensions.width <= 0 || dimensions.height <= 0)
++    throw new Error("Native screenshot has no pixels");
++  const imageScale = Math.min(1, 1280 / dimensions.width, 960 / dimensions.height);
++  let data = result.data;
++  if (imageScale < 1) {
++    image = image.resize({
++      width: Math.max(1, Math.floor(dimensions.width * imageScale)),
++      height: Math.max(1, Math.floor(dimensions.height * imageScale)),
++    });
++    data = image.toJPEG(65).toString("base64");
++  }
++  if (data.length > 1_099_900) throw new Error("Native screenshot exceeds the image size limit");
++  capture.frame = {
++    data: `data:image/jpeg;base64,${data}`,
++    ...image.getSize(),
++    capturedAt,
++  };
++}
++
++export function registerNativeBrowserBridgeIpc(
++  ipc: NativeIpcRegistry,
++  dependencies: NativeBrowserBridgeDependencies,
++): void {
++  function resolveGuest(
++    sender: NativeBrowserContents,
++    input: { browserId: string; workspaceId: string },
++  ): NativeBrowserContents {
++    const contents = dependencies.getGuest(input.browserId, sender.id);
++    if (!contents || dependencies.getWorkspaceId(input.browserId) !== input.workspaceId) {
++      throw new Error("Native browser does not belong to this host window and workspace");
++    }
++    return contents;
++  }
++
 +  ipc.handle("paseo:browser:native-frame", async (event, raw: unknown) => {
-+    if (!raw || typeof raw !== "object") throw new Error("Invalid native frame request");
-+    const contents = resolveGuest(hostSender(event), raw as Record<string, unknown>);
++    const input = NativeBrowserFrameRequestSchema.parse(raw);
++    const contents = resolveGuest(hostSender(event), input);
 +    const capture = observe(contents);
-+    capture.demandedAt = Date.now();
 +    if (!capture.streaming) {
 +      capture.streaming = true;
 +      capture.host = hostSender(event);
@@ -253,7 +1567,7 @@ index 0000000..6e272e3
 +        throw error;
 +      }
 +    }
-+    consumeNativeFrame(contents, capture);
++    consumeNativeFrame(contents, capture, dependencies.images);
 +    if (capture.stopTimer) clearTimeout(capture.stopTimer);
 +    capture.stopTimer = setTimeout(() => {
 +      if (!contents.isDestroyed())
@@ -268,29 +1582,33 @@ index 0000000..6e272e3
 +      capture.acknowledgements.clear();
 +      capture.stopTimer = null;
 +    }, 2500);
++    const frame = capture.frame;
++    const fresh =
++      frame && frame.capturedAt + 1500 > Date.now() && frame.capturedAt > (input.notBefore ?? 0);
++    if (!fresh && Date.now() > capture.notBefore) {
++      // Screencast frames arrive only on paint. Refresh quiet pages with a bounded
++      // screenshot rather than relabeling an old paint with a new timestamp.
++      if (!capture.stillTask && Date.now() - capture.lastStillAttemptAt >= 1000) {
++        capture.lastStillAttemptAt = Date.now();
++        capture.stillTask = capture.tail
++          .then(() => captureStillFrame(contents, capture, dependencies.images))
++          .finally(() => {
++            capture.stillTask = null;
++          });
++        capture.tail = capture.stillTask.catch(() => undefined);
++      }
++      if (capture.stillTask) await capture.stillTask;
++    }
 +    return capture.frame &&
 +      capture.frame.capturedAt + 1500 > Date.now() &&
-+      capture.frame.capturedAt > Number((raw as Record<string, unknown>).notBefore ?? 0)
++      capture.frame.capturedAt > (input.notBefore ?? 0)
 +      ? capture.frame
 +      : null;
 +  });
 +  ipc.handle("paseo:browser:native-command", async (event, raw: unknown) => {
-+    if (!raw || typeof raw !== "object") throw new Error("Invalid native CDP request");
-+    const input = raw as Record<string, unknown>;
++    const input = NativeBrowserCommandRequestSchema.parse(raw);
 +    const contents = resolveGuest(hostSender(event), input);
-+    if (
-+      typeof input.method !== "string" ||
-+      !/^[A-Za-z]+\.[A-Za-z][A-Za-z0-9]*$/.test(input.method)
-+    ) {
-+      throw new Error("Invalid CDP method");
-+    }
 +    const method = input.method;
-+    const contextMethods = new Set([
-+      "Browser.grantPermissions",
-+      "Browser.resetPermissions",
-+      "Browser.setPermission",
-+      "Browser.setDownloadBehavior",
-+    ]);
 +    if (
 +      method.startsWith("Browser.") &&
 +      method !== "Browser.getVersion" &&
@@ -304,16 +1622,13 @@ index 0000000..6e272e3
 +    ) {
 +      throw new Error("Use native browser tab tools for target lifecycle operations");
 +    }
-+    const params =
-+      input.params && typeof input.params === "object" && !Array.isArray(input.params)
-+        ? (input.params as Record<string, unknown>)
-+        : {};
++    const params = input.params ?? {};
 +    if (params.browserContextId !== undefined)
 +      throw new Error("Explicit browser contexts are outside the native guest");
 +    if (Buffer.byteLength(JSON.stringify(params)) > MAX_EVENT_BYTES)
 +      throw new Error("CDP parameters exceed the size limit");
 +    const capture = observe(contents);
-+    const pending = capture.tail.then(async () => {
++    const execute = async () => {
 +      if (contents.isDestroyed()) throw new Error("Native browser was closed");
 +      if (!contents.debugger.isAttached()) contents.debugger.attach("1.3");
 +      if (method === "Target.getTargets" || method === "Target.getTargetInfo") {
@@ -323,11 +1638,6 @@ index 0000000..6e272e3
 +        return method === "Target.getTargets" ? { targetInfos: [own.targetInfo] } : own;
 +      }
 +
-+      const cookies: Record<string, string> = {
-+        "Storage.getCookies": "Network.getAllCookies",
-+        "Storage.setCookies": "Network.setCookies",
-+        "Storage.clearCookies": "Network.clearBrowserCookies",
-+      };
 +      if (cookies[method]) return contents.debugger.sendCommand(cookies[method], params);
 +      if (contextMethods.has(method)) {
 +        const own = await contents.debugger.sendCommand("Target.getTargetInfo");
@@ -339,15 +1649,16 @@ index 0000000..6e272e3
 +        });
 +      }
 +      return contents.debugger.sendCommand(method, params);
-+    });
++    };
++    if (unblockers.has(method)) return execute();
++    const pending = capture.tail.then(execute);
 +    capture.tail = pending.catch(() => undefined);
 +    return pending;
 +  });
 +  ipc.handle("paseo:browser:native-events", (event, raw: unknown) => {
-+    if (!raw || typeof raw !== "object") throw new Error("Invalid native event request");
-+    const input = raw as Record<string, unknown>;
++    const input = NativeBrowserEventsRequestSchema.parse(raw);
 +    const capture = observe(resolveGuest(hostSender(event), input));
-+    const matches = (item: NativeEvent) =>
++    const matches = (item: NativeBrowserEvent) =>
 +      typeof input.method !== "string" || item.method === input.method;
 +    const events = capture.events.filter(matches);
 +    if (input.clear !== false) capture.events = capture.events.filter((item) => !matches(item));
@@ -360,21 +1671,172 @@ index 0000000..6e272e3
 +    return { events, dropped };
 +  });
 +}
+diff --git a/packages/desktop/src/main.ts b/packages/desktop/src/main.ts
+index 072f96a..4064b42 100644
+--- a/packages/desktop/src/main.ts
++++ b/packages/desktop/src/main.ts
+@@ -339,9 +339,17 @@ if (forcedUserDataDir) {
+ // Must run before app.whenReady().
+ const electronFlags = process.env.PASEO_ELECTRON_FLAGS?.trim();
+ if (electronFlags) {
+-  for (const token of electronFlags.split(/\s+/)) {
++  const tokens = electronFlags.split(/\s+/);
++  for (let index = 0; index < tokens.length; index++) {
++    const token = tokens[index]!;
+     const [key, ...rest] = token.replace(/^--/, "").split("=");
+-    app.commandLine.appendSwitch(key, rest.join("=") || undefined);
++    let value = rest.join("=") || undefined;
++    const backend = key === "ozone-platform" || key === "ozone-platform-hint";
++    if (backend && !token.includes("=")) {
++      value = tokens[++index];
++    }
++    if (backend && app.commandLine.hasSwitch(key)) continue;
++    app.commandLine.appendSwitch(key, value);
+   }
+   log.info("[electron-flags]", electronFlags);
+ }
 diff --git a/packages/desktop/src/preload.ts b/packages/desktop/src/preload.ts
-index 0942134..4d3f21b 100644
+index 0942134..2aa3282 100644
 --- a/packages/desktop/src/preload.ts
 +++ b/packages/desktop/src/preload.ts
-@@ -115,6 +115,13 @@ contextBridge.exposeInMainWorld("paseoDesktop", {
+@@ -1,3 +1,8 @@
++import type {
++  NativeBrowserFrameRequest,
++  NativeBrowserCommandRequest,
++  NativeBrowserEventsRequest,
++} from "@getpaseo/protocol/browser-native";
+ import { contextBridge, ipcRenderer, webUtils } from "electron";
+ import type { BrowserKeyboardPolicy } from "./features/browser-keyboard/index.js";
+ import type { DesktopWindowChromeMode } from "./window/chrome.js";
+@@ -115,6 +120,13 @@ contextBridge.exposeInMainWorld("paseoDesktop", {
        ipcRenderer.invoke("paseo:menu:set-capturing-shortcut", capturing),
    },
    browser: {
 +    nativeBridgeVersion: 1,
-+    captureNativeFrame: (input: Record<string, unknown>) =>
++    captureNativeFrame: (input: NativeBrowserFrameRequest) =>
 +      ipcRenderer.invoke("paseo:browser:native-frame", input),
-+    sendNativeCommand: (input: Record<string, unknown>) =>
++    sendNativeCommand: (input: NativeBrowserCommandRequest) =>
 +      ipcRenderer.invoke("paseo:browser:native-command", input),
-+    readNativeEvents: (input: Record<string, unknown>) =>
++    readNativeEvents: (input: NativeBrowserEventsRequest) =>
 +      ipcRenderer.invoke("paseo:browser:native-events", input),
      setShortcutPolicy: (input: BrowserKeyboardPolicy) =>
        ipcRenderer.invoke("paseo:browser:set-shortcut-policy", input),
      profilePartition: PASEO_BROWSER_PROFILE_PARTITION,
+diff --git a/packages/protocol/src/browser-automation/rpc-schemas.test.ts b/packages/protocol/src/browser-automation/rpc-schemas.test.ts
+index a47f248..a811bf5 100644
+--- a/packages/protocol/src/browser-automation/rpc-schemas.test.ts
++++ b/packages/protocol/src/browser-automation/rpc-schemas.test.ts
+@@ -1,3 +1,8 @@
++import {
++  NativeBrowserCommandRequestSchema,
++  NativeBrowserFrameRequestSchema,
++  NativeBrowserEventsRequestSchema,
++} from "../browser-native.js";
+ import { describe, expect, test } from "vitest";
+ 
+ import {
+@@ -819,3 +824,33 @@ describe("browser automation execute RPC schemas", () => {
+     });
+   });
+ });
++
++describe("native Desktop DevTools IPC requests", () => {
++  const guest = { browserId: BROWSER_ID, workspaceId: "workspace" };
++  test("accepts arbitrary guest CDP domains without narrowing to an automation command list", () => {
++    const input = { ...guest, method: "CSS.getMatchedStylesForNode", params: { nodeId: 12 } };
++    expect(NativeBrowserCommandRequestSchema.parse(input)).toEqual(input);
++  });
++  test("rejects missing guest identity and malformed protocol methods at the IPC boundary", () => {
++    expect(NativeBrowserCommandRequestSchema.safeParse({ method: "DOM.getDocument" }).success).toBe(
++      false,
++    );
++    expect(
++      NativeBrowserCommandRequestSchema.safeParse({ ...guest, method: "not a command" }).success,
++    ).toBe(false);
++    expect(
++      NativeBrowserCommandRequestSchema.safeParse({
++        ...guest,
++        method: "DOM.getDocument",
++        params: [],
++      }).success,
++    ).toBe(false);
++  });
++  test("validates frame freshness and preserves non-destructive event reads", () => {
++    expect(NativeBrowserFrameRequestSchema.safeParse({ ...guest, notBefore: -1 }).success).toBe(
++      false,
++    );
++    const input = { ...guest, method: "Debugger.paused", clear: false };
++    expect(NativeBrowserEventsRequestSchema.parse(input)).toEqual(input);
++  });
++});
+diff --git a/packages/protocol/src/browser-native.ts b/packages/protocol/src/browser-native.ts
+new file mode 100644
+index 0000000..8c1f060
+--- /dev/null
++++ b/packages/protocol/src/browser-native.ts
+@@ -0,0 +1,38 @@
++import { z } from "zod";
++
++const guest = {
++  browserId: z.string().min(1).max(256),
++  workspaceId: z.string().min(1).max(256),
++};
++export const NativeBrowserFrameRequestSchema = z.object({
++  ...guest,
++  notBefore: z.number().finite().nonnegative().optional(),
++});
++export const NativeBrowserCommandRequestSchema = z.object({
++  ...guest,
++  method: z.string().regex(/^[A-Za-z]+\.[A-Za-z][A-Za-z0-9]*$/),
++  params: z.record(z.string(), z.unknown()).optional(),
++});
++export const NativeBrowserEventsRequestSchema = z.object({
++  ...guest,
++  method: z.string().optional(),
++  clear: z.boolean().optional(),
++});
++export type NativeBrowserFrameRequest = z.infer<typeof NativeBrowserFrameRequestSchema>;
++export type NativeBrowserCommandRequest = z.infer<typeof NativeBrowserCommandRequestSchema>;
++export type NativeBrowserEventsRequest = z.infer<typeof NativeBrowserEventsRequestSchema>;
++export interface NativeBrowserFrame {
++  data: string;
++  width: number;
++  height: number;
++  capturedAt: number;
++}
++export interface NativeBrowserEvent {
++  method: string;
++  params: Record<string, unknown>;
++  sessionId?: string;
++}
++export interface NativeBrowserEvents {
++  events: NativeBrowserEvent[];
++  dropped: number;
++}
+diff --git a/public-docs/browser-tools.md b/public-docs/browser-tools.md
+index f1d586d..3b7b5a1 100644
+--- a/public-docs/browser-tools.md
++++ b/public-docs/browser-tools.md
+@@ -76,3 +76,22 @@ Tools return structured errors rather than failing silently. The ones agents see
+ | `browser_stale_ref` | The ref no longer matches the page — take a new snapshot.                       |
+ | `browser_timeout`   | The element never became actionable, or the wait condition never held.          |
+ | `browser_denied`    | The action isn't allowed — e.g. a non-`http(s)` URL, or no history to navigate. |
++
++## Native Desktop DevTools API
++
++Paseo Desktop exposes `paseoDesktop.browser.nativeBridgeVersion` (`1`) with
++`sendNativeCommand`, `readNativeEvents` and `captureNativeFrame`. Browser plugins detect
++this API on the connected Desktop; users do not install a separate bridge or patch the app.
++Older Desktop builds need an update containing this API for full native CDP access.
++
++Requests include `browserId` and `workspaceId`. Desktop resolves the registered guest for
++the calling host window and workspace before sending any command. DOM, CSS, Runtime,
++Network, Accessibility, Debugger and profiling domains operate on that guest. Browser
++shutdown and target lifecycle commands are excluded; use the normal browser tab APIs.
++Cookie operations and permission/download settings use the guest's browser context.
++
++Enable a CDP domain before reading its events. The event buffer is bounded by count and
++bytes and reports a dropped-event counter; consumers should drain it promptly. Dialog
++responses, paused-frame/object inspection and debugger resume/step commands can run while
++a previous command waits for JavaScript to continue. Quiet pages use bounded still captures
++when the screencast has no fresh paint. Finish intercepted requests and resume execution after debugging.
