@@ -64,7 +64,8 @@ export class NativeRelay {
       };
       this.workspaces.set(id, workspace);
     }
-    if (workspace.control && workspace.control.until <= this.now()) workspace.control = null;
+    if (workspace.control && workspace.control.until <= this.now() && !workspace.takeover)
+      workspace.control = null;
     if (workspace.clientId && workspace.seenAt + OWNER_TTL < this.now()) {
       workspace.clientId = null;
       workspace.state = null;
@@ -144,9 +145,11 @@ export class NativeRelay {
     const commands: NativeCommand[] = [];
     // Keep input ordered, but permit event reads and replies that unblock paused JavaScript.
     const inFlight = [...workspace.pending.values()].some((p) => p.dispatched);
-    if (input.state && !workspace.takeover) {
+    if (input.state) {
       for (const next of workspace.pending.values()) {
-        if (next.dispatched || (inFlight && !canUnblock(next.command))) continue;
+        const unblocker = canUnblock(next.command);
+        if (next.dispatched || (inFlight && !unblocker)) continue;
+        if (workspace.takeover && (!unblocker || next.owner !== workspace.control?.id)) continue;
         if (
           !["tabs.list", "open"].includes(next.command.operation) &&
           workspace.control?.id !== next.owner

@@ -264,3 +264,38 @@ it("removes an undispatched timeout without blocking human control", async () =>
   expect(await relay.control("workspace", phone, true, "acquire")).toEqual({ controller: phone });
   expect(exchange(relay).commands).toEqual([]);
 });
+
+it.each([
+  ["browser_dialog", { accept: false }],
+  ["cdp_send", { method: "Debugger.resume" }],
+])("dispatches %s during takeover after timeout and lease expiry while fencing ordinary work", async (operation, input) => {
+  vi.useFakeTimers();
+  let now = 1000;
+  const relay = fixture(() => now);
+  exchange(relay);
+  await relay.control("workspace", "agent", false, "acquire");
+  const evaluating = relay.command("workspace", "agent", "cdp_send", { method: "Runtime.evaluate" })
+    .catch((error: Error) => error.message);
+  const evaluation = exchange(relay).commands[0];
+  const takeover = relay.control("workspace", phone, true, "acquire");
+  for (let heartbeat = 0; heartbeat < 8; heartbeat++) {
+    now += 4000;
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(exchange(relay).commands).toEqual([]);
+  }
+  expect(await evaluating).toContain("timed out");
+  const navigating = relay.command("workspace", "agent", "navigate", {})
+    .catch((error: Error) => error.message);
+  const replying = relay.command("workspace", "agent", operation, input);
+  const reply = exchange(relay).commands[0];
+  expect(reply.operation).toBe(operation);
+  expect(reply.input).toEqual(input);
+  exchange(relay, [{ id: evaluation.id, result: {} }]);
+  await Promise.resolve();
+  expect(relay.watch("workspace", phone, 0).controller).toBe("agent");
+  exchange(relay, [{ id: reply.id, result: {} }]);
+  await replying;
+  expect(await takeover).toEqual({ controller: phone });
+  expect(exchange(relay).commands).toEqual([]);
+  expect(await navigating).toContain("control changed before dispatch");
+});
