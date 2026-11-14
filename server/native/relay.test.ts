@@ -1,8 +1,9 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { NativeRelay } from "./relay";
 const relays: NativeRelay[] = [];
 afterEach(async () => {
   await Promise.all(relays.splice(0).map((relay) => relay.close()));
+  vi.useRealTimers();
 });
 const state = {
   browserId: "native-one",
@@ -227,4 +228,39 @@ it("waits for every dispatched command before handing control to a human", async
   exchange(relay, [{ id: inspection.id, result: {} }]);
   await inspecting;
   expect(await takeover).toEqual({ controller: phone });
+});
+
+it("keeps timed-out execution tracked until Desktop confirms completion before takeover", async () => {
+  vi.useFakeTimers();
+  const relay = fixture(() => 1000);
+  exchange(relay);
+  await relay.control("workspace", "agent", false, "acquire");
+  const result = relay.command("workspace", "agent", "cdp_send", { method: "Runtime.evaluate" })
+    .catch((error: Error) => error.message);
+  const command = exchange(relay).commands[0];
+  let tookControl = false;
+  const takeover = relay.control("workspace", phone, true, "acquire").then((result) => {
+    tookControl = true;
+    return result;
+  });
+  await vi.advanceTimersByTimeAsync(15_000);
+  expect(await result).toContain("timed out");
+  expect(tookControl).toBe(false);
+  expect(relay.watch("workspace", phone, 0).controller).toBe("agent");
+  expect(exchange(relay).commands).toEqual([]);
+  exchange(relay, [{ id: command.id, result: { finished: true } }]);
+  expect(await takeover).toEqual({ controller: phone });
+});
+
+it("removes an undispatched timeout without blocking human control", async () => {
+  vi.useFakeTimers();
+  const relay = fixture(() => 1000);
+  exchange(relay);
+  await relay.control("workspace", "agent", false, "acquire");
+  const result = relay.command("workspace", "agent", "navigate", { url: "https://example.test" })
+    .catch((error: Error) => error.message);
+  await vi.advanceTimersByTimeAsync(15_000);
+  expect(await result).toContain("timed out");
+  expect(await relay.control("workspace", phone, true, "acquire")).toEqual({ controller: phone });
+  expect(exchange(relay).commands).toEqual([]);
 });

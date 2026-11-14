@@ -254,12 +254,18 @@ export class NativeRelay {
       };
       const command = { id: randomUUID(), operation, input };
       const timer = setTimeout(() => {
-        workspace.pending.delete(command.id);
-        refuse(
-          Error(
-            "Native browser command timed out. Keep Paseo Desktop connected to this host so it can start the workspace browser. Dispatched mutations are not retried.",
-          ),
+        const pending = workspace.pending.get(command.id);
+        if (!pending) return;
+        const error = Error(
+          "Native browser command timed out. Keep Paseo Desktop connected to this host so it can start the workspace browser. Dispatched mutations are not retried.",
         );
+        if (pending.dispatched) {
+          // The caller's timeout does not end execution on Desktop.
+          reject(error);
+        } else {
+          workspace.pending.delete(command.id);
+          refuse(error);
+        }
       }, 15_000);
       workspace.pending.set(command.id, {
         command,
