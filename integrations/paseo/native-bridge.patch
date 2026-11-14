@@ -116,7 +116,7 @@ index 1d0cfeb..701ca24 100644
        command: executablePath,
        args,
 diff --git a/packages/desktop/e2e/window-startup.e2e.mjs b/packages/desktop/e2e/window-startup.e2e.mjs
-index e6654c0..fcf5d52 100644
+index e6654c0..191cb1c 100644
 --- a/packages/desktop/e2e/window-startup.e2e.mjs
 +++ b/packages/desktop/e2e/window-startup.e2e.mjs
 @@ -1,11 +1,14 @@
@@ -135,7 +135,7 @@ index e6654c0..fcf5d52 100644
  
  async function launchWindowWithoutHiddenFrames() {
    const main = path.join(root, "main.cjs");
-@@ -37,11 +40,137 @@ async function expectLoadedDesktopIsShown(desktop) {
+@@ -37,11 +40,170 @@ async function expectLoadedDesktopIsShown(desktop) {
    await expect(page.getByRole("heading", { name: "Desktop ready" })).toBeVisible();
  }
  
@@ -220,6 +220,34 @@ index e6654c0..fcf5d52 100644
 +        await native("command", { method: "Emulation.clearDeviceMetricsOverride" });
 +        return { reported: { width: frame.width, height: frame.height }, encoded: image.getSize() };
 +      };
++      global.captureWhilePaused = async () => {
++        await native("command", { method: "Debugger.enable" });
++        const evaluating = native("command", { method: "Runtime.evaluate", params: { expression: "debugger; 42" } });
++        let deadline;
++        try {
++          let paused = false;
++          for (let attempt = 0; attempt < 100; attempt++) {
++            const result = await native("events", { method: "Debugger.paused" });
++            if (result.events.length) { paused = true; break; }
++            await new Promise(resolve => setTimeout(resolve, 20));
++          }
++          if (!paused) throw new Error("Guest did not pause");
++          await new Promise(resolve => setTimeout(resolve, 1600));
++          const frame = await Promise.race([
++            native("frame"),
++            new Promise((_, reject) => {
++              deadline = setTimeout(() => reject(new Error("Frame blocked by paused JavaScript")), 2000);
++            }),
++          ]);
++          const events = await native("events", { method: "Debugger.resumed" });
++          return { captured: Boolean(frame), resumedBeforeCapture: events.events.length > 0 };
++        } finally {
++          clearTimeout(deadline);
++          await native("command", { method: "Debugger.resume" });
++          await evaluating;
++          await native("command", { method: "Debugger.disable" });
++        }
++      };
 +      global.backgroundReady = true;
 +    });
 +  `,
@@ -270,6 +298,11 @@ index e6654c0..fcf5d52 100644
 +  console.log(
 +    "Native quiet-page capture bounds high-DPI JPEG pixels and reports encoded dimensions",
 +  );
++  expect(await desktop.evaluate(() => global.captureWhilePaused())).toEqual({
++    captured: true,
++    resumedBeforeCapture: false,
++  });
++  console.log("Native frames remain available while guest JavaScript is paused at a breakpoint");
  } finally {
    await desktop?.close();
    await rm(root, { recursive: true, force: true });
@@ -859,10 +892,10 @@ index 18e5b84..5053f59 100644
      const hostContents = (event as { sender?: HostWebContents }).sender;
 diff --git a/packages/desktop/src/features/browser-automation/native-bridge.test.ts b/packages/desktop/src/features/browser-automation/native-bridge.test.ts
 new file mode 100644
-index 0000000..b7e608e
+index 0000000..3c88f63
 --- /dev/null
 +++ b/packages/desktop/src/features/browser-automation/native-bridge.test.ts
-@@ -0,0 +1,347 @@
+@@ -0,0 +1,414 @@
 +import { EventEmitter } from "node:events";
 +import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 +import {
@@ -1091,6 +1124,73 @@ index 0000000..b7e608e
 +    );
 +  });
 +
++  test("captures while JavaScript waits even when a viewport command is queued behind it", async () => {
++    const { guest, call } = fixture();
++    const running = Promise.withResolvers<unknown>();
++    const started = Promise.withResolvers<void>();
++    const send = guest.debugger.sendCommand.getMockImplementation()!;
++    guest.debugger.sendCommand.mockImplementation(async (method, params) => {
++      if (method === "Runtime.evaluate") {
++        started.resolve();
++        return running.promise;
++      }
++      return send(method, params);
++    });
++    const evaluating = call("command", { method: "Runtime.evaluate" });
++    await started.promise;
++    const params = { width: 800, height: 600, deviceScaleFactor: 1, mobile: false };
++    const emulating = call("command", { method: "Emulation.setDeviceMetricsOverride", params });
++    let frame: unknown = null;
++    const capturing = call("frame").then((result) => {
++      frame = result;
++      return result;
++    });
++    try {
++      await vi.advanceTimersByTimeAsync(0);
++      expect(frame).toMatchObject({ width: 1280, height: 960, capturedAt: 10000 });
++      expect(guest.debugger.sendCommand).not.toHaveBeenCalledWith(
++        "Emulation.setDeviceMetricsOverride",
++        params,
++      );
++    } finally {
++      running.resolve({ result: { value: "done" } });
++      await Promise.all([evaluating, emulating, capturing]);
++    }
++  });
++
++  test("waits for an active viewport change before reading screenshot metrics", async () => {
++    const { guest, call } = fixture();
++    const changing = Promise.withResolvers<unknown>();
++    const started = Promise.withResolvers<void>();
++    const send = guest.debugger.sendCommand.getMockImplementation()!;
++    guest.debugger.sendCommand.mockImplementation(async (method, params) => {
++      if (method === "Emulation.setDeviceMetricsOverride") {
++        started.resolve();
++        return changing.promise;
++      }
++      return send(method, params);
++    });
++    const emulating = call("command", {
++      method: "Emulation.setDeviceMetricsOverride",
++      params: {
++        width: 800,
++        height: 600,
++        deviceScaleFactor: 1,
++        mobile: false,
++      },
++    });
++    await started.promise;
++    const capturing = call("frame");
++    try {
++      await vi.advanceTimersByTimeAsync(0);
++      expect(guest.debugger.sendCommand).not.toHaveBeenCalledWith("Page.getLayoutMetrics");
++    } finally {
++      changing.resolve({});
++      await emulating;
++      await expect(capturing).resolves.toMatchObject({ width: 1280, height: 960 });
++    }
++  });
++
 +  test("restricts browser-wide commands and maps cookies and permissions to the registered guest", async () => {
 +    const { guest, call } = fixture();
 +    await expect(call("command", { method: "Browser.close" })).rejects.toThrow(
@@ -1212,10 +1312,10 @@ index 0000000..b7e608e
 +});
 diff --git a/packages/desktop/src/features/browser-automation/native-bridge.ts b/packages/desktop/src/features/browser-automation/native-bridge.ts
 new file mode 100644
-index 0000000..ba69dd3
+index 0000000..adda26b
 --- /dev/null
 +++ b/packages/desktop/src/features/browser-automation/native-bridge.ts
-@@ -0,0 +1,455 @@
+@@ -0,0 +1,462 @@
 +import {
 +  NativeBrowserFrameRequestSchema,
 +  NativeBrowserCommandRequestSchema,
@@ -1223,6 +1323,7 @@ index 0000000..ba69dd3
 +} from "@getpaseo/protocol/browser-native";
 +import type { WebContents, NativeImage } from "electron";
 +import type { NativeBrowserEvent, NativeBrowserFrame } from "@getpaseo/protocol/browser-native";
++import { CdpSessionQueue } from "./cdp-session-queue.js";
 +
 +export interface NativeBrowserContents extends Pick<
 +  WebContents,
@@ -1246,6 +1347,7 @@ index 0000000..ba69dd3
 +
 +interface Capture {
 +  tail: Promise<unknown>;
++  viewportQueue: CdpSessionQueue;
 +  events: NativeBrowserEvent[];
 +  bytes: number;
 +  dropped: number;
@@ -1327,6 +1429,7 @@ index 0000000..ba69dd3
 +  if (existing) return existing;
 +  const capture: Capture = {
 +    tail: Promise.resolve(),
++    viewportQueue: new CdpSessionQueue(),
 +    events: [],
 +    bytes: 0,
 +    dropped: 0,
@@ -1590,12 +1693,11 @@ index 0000000..ba69dd3
 +      // screenshot rather than relabeling an old paint with a new timestamp.
 +      if (!capture.stillTask && Date.now() - capture.lastStillAttemptAt >= 1000) {
 +        capture.lastStillAttemptAt = Date.now();
-+        capture.stillTask = capture.tail
-+          .then(() => captureStillFrame(contents, capture, dependencies.images))
++        capture.stillTask = capture.viewportQueue
++          .run(() => captureStillFrame(contents, capture, dependencies.images))
 +          .finally(() => {
 +            capture.stillTask = null;
 +          });
-+        capture.tail = capture.stillTask.catch(() => undefined);
 +      }
 +      if (capture.stillTask) await capture.stillTask;
 +    }
@@ -1651,7 +1753,12 @@ index 0000000..ba69dd3
 +      return contents.debugger.sendCommand(method, params);
 +    };
 +    if (unblockers.has(method)) return execute();
-+    const pending = capture.tail.then(execute);
++    const pending = capture.tail.then(() => {
++      if (method.startsWith("Emulation.") || method === "Page.captureScreenshot") {
++        return capture.viewportQueue.run(execute);
++      }
++      return execute();
++    });
 +    capture.tail = pending.catch(() => undefined);
 +    return pending;
 +  });
