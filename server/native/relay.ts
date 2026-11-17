@@ -17,7 +17,7 @@ type Workspace = {
   seenAt: number;
   state: NativeState | null;
   frame: NativeFrame | null;
-  frameReceivedAt:number;
+  frameReceivedAt: number;
   pending: Map<string, Pending>;
   viewers: Map<string, number>;
   control: { id: string; human: boolean; until: number } | null;
@@ -27,19 +27,35 @@ type Workspace = {
 const OWNER_TTL = 5_000;
 const VIEWER_TTL = 2_500;
 const CDP_UNBLOCKERS = new Set([
-  "Debugger.evaluateOnCallFrame", "Debugger.getScriptSource", "Runtime.getProperties",
-  "Page.handleJavaScriptDialog", "Debugger.resume", "Debugger.stepInto", "Debugger.stepOut",
-  "Debugger.stepOver", "Debugger.disable", "Runtime.terminateExecution", "Runtime.runIfWaitingForDebugger",
-  "Fetch.continueRequest", "Fetch.continueResponse", "Fetch.fulfillRequest", "Fetch.failRequest",
-  "Fetch.continueWithAuth", "Fetch.disable",
+  "Debugger.evaluateOnCallFrame",
+  "Debugger.getScriptSource",
+  "Runtime.getProperties",
+  "Page.handleJavaScriptDialog",
+  "Debugger.resume",
+  "Debugger.stepInto",
+  "Debugger.stepOut",
+  "Debugger.stepOver",
+  "Debugger.disable",
+  "Runtime.terminateExecution",
+  "Runtime.runIfWaitingForDebugger",
+  "Fetch.continueRequest",
+  "Fetch.continueResponse",
+  "Fetch.fulfillRequest",
+  "Fetch.failRequest",
+  "Fetch.continueWithAuth",
+  "Fetch.disable",
 ]);
 function canUnblock(command: NativeCommand): boolean {
-  return command.operation === "cdp_events" || command.operation === "browser_dialog" ||
-    (command.operation === "cdp_send" && typeof command.input.method === "string" && CDP_UNBLOCKERS.has(command.input.method));
+  return (
+    command.operation === "cdp_events" ||
+    command.operation === "browser_dialog" ||
+    (command.operation === "cdp_send" &&
+      typeof command.input.method === "string" &&
+      CDP_UNBLOCKERS.has(command.input.method))
+  );
 }
 const CONTROL_TTL = 30_000;
 
-/** Workspace-bound command mailbox. Published mutations are never retried. */
 export class NativeRelay {
   private workspaces = new Map<string, Workspace>();
   private tickets = new Map<string, { workspaceId: string; agentId: string; cwd?: string }>();
@@ -55,7 +71,7 @@ export class NativeRelay {
         seenAt: 0,
         state: null,
         frame: null,
-        frameReceivedAt:0,
+        frameReceivedAt: 0,
         pending: new Map(),
         viewers: new Map(),
         control: null,
@@ -72,7 +88,8 @@ export class NativeRelay {
       workspace.frame = null;
       workspace.control = null;
       workspace.takeover = null;
-      workspace.error = "Desktop browser disconnected. Waiting for a connected desktop to host it again.";
+      workspace.error =
+        "Desktop browser disconnected. Waiting for a connected desktop to host it again.";
       for (const pending of workspace.pending.values()) {
         clearTimeout(pending.timer);
         pending.reject(
@@ -91,7 +108,10 @@ export class NativeRelay {
     for (const id of this.workspaces.keys()) {
       const workspace = this.workspace(id);
       if (workspace.clientId) workspaceIds.push(id);
-      if (workspace.pending.size || [...workspace.viewers.values()].some(until => until > this.now()))
+      if (
+        workspace.pending.size ||
+        [...workspace.viewers.values()].some((until) => until > this.now())
+      )
         requestedWorkspaceIds.push(id);
     }
     return { workspaceIds, requestedWorkspaceIds };
@@ -150,20 +170,10 @@ export class NativeRelay {
         const unblocker = canUnblock(next.command);
         if (next.dispatched || (inFlight && !unblocker)) continue;
         if (workspace.takeover && (!unblocker || next.owner !== workspace.control?.id)) continue;
-        if (
-          !["tabs.list", "open"].includes(next.command.operation) &&
-          workspace.control?.id !== next.owner
-        ) {
-          clearTimeout(next.timer);
-          workspace.pending.delete(next.command.id);
-          next.reject(Error("Browser control changed before dispatch"));
-          continue;
-        }
-        if (
-          next.command.operation === "open" &&
-          workspace.control &&
-          workspace.control.id !== next.owner
-        ) {
+        const requiresControl = !["tabs.list", "open"].includes(next.command.operation);
+        const openingControlledBrowser =
+          next.command.operation === "open" && workspace.control !== null;
+        if ((requiresControl || openingControlledBrowser) && workspace.control?.id !== next.owner) {
           clearTimeout(next.timer);
           workspace.pending.delete(next.command.id);
           next.reject(Error("Browser control changed before dispatch"));
@@ -305,17 +315,19 @@ export class NativeRelay {
           parsed.operation === "acquire-control"
             ? await this.control(binding.workspaceId, binding.agentId, false, "acquire")
             : parsed.operation === "release-control"
-              ? await this.control(binding.workspaceId, binding.agentId, false, "release")
-              : await this.command(binding.workspaceId, binding.agentId, parsed.operation, {
-                  ...(parsed.input ?? {}),
-                  ...(parsed.operation === "automation" ? { cwd: binding.cwd } : {}),
-                });
+            ? await this.control(binding.workspaceId, binding.agentId, false, "release")
+            : await this.command(binding.workspaceId, binding.agentId, parsed.operation, {
+                ...(parsed.input ?? {}),
+                ...(parsed.operation === "automation" ? { cwd: binding.cwd } : {}),
+              });
         res.setHeader("Content-Type", "application/json");
         res.end(JSON.stringify({ result }));
       } catch (error) {
-        res
-          .writeHead(400, { "Content-Type": "application/json" })
-          .end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+        res.writeHead(400, { "Content-Type": "application/json" }).end(
+          JSON.stringify({
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        );
       }
     });
     await new Promise<void>((resolve) => this.server!.listen(0, "127.0.0.1", resolve));
