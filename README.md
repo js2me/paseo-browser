@@ -29,9 +29,11 @@ The mobile viewer retains its last decoded frame while the next JPEG loads, with
 
 Keeping the daemon running after closing Desktop does not keep the browser window alive. When an agent explicitly opens a site and no browser host responds, a packaged Linux daemon with a graphical display can reopen its own installed Paseo Desktop. It first waits for the normal connection, limits launch attempts to one per 30 seconds and never restarts the daemon. Status checks, viewer polls and already dispatched actions do not launch Desktop. Headless hosts, plain Node daemons and other operating systems still require an available Desktop window. A command paused by request interception or a debugger is reported separately from a disconnected browser.
 
-Each workspace supports eight native tabs. Take and release control to pass the browser between a person and agents. Native agent tools wait for an in-flight command before a human takeover and reject commands whose lease changed. Dispatched mutations are never automatically retried. Mobile taps target the desktop viewport; the text controls send input to the focused page field.
+Each workspace supports eight native tabs. People and agents work in the same browser without taking or releasing control. Agent and mobile commands run in order, while desktop input stays available. Dispatched mutations are never automatically retried. Mobile taps target the desktop viewport; the text controls send input to the focused page field.
 
-On desktop, take control and click **DevTools** to open Chromium's developer tools for the selected tab in a separate window, including Elements, Console, Network, Sources and Application.
+After one minute without an attached panel, remote viewers, a controller or browser commands, the workspace's native WebViews are destroyed to free Chromium memory. Reopening the panel or receiving a remote browser request restores its tab URLs and selected tab. Cookies and logins remain in the shared profile; navigation history, unsaved forms and other in-page state are lost. URL snapshots are kept in memory for up to 128 inactive workspaces and cleared when the plugin stops.
+
+On desktop, click **DevTools** to open Chromium's developer tools for the selected tab in a separate window, including Elements, Console, Network, Sources and Application.
 
 Native tabs use `persist:paseo-browser`, the same profile as Paseo's built-in browser. Cookies and logins are shared across native workspace tabs. This is independent of the legacy daemon Chrome profiles.
 
@@ -47,13 +49,14 @@ The files under `integrations/paseo/` are developer integration artifacts, not e
 
 Native mode injects the `paseo-browser` MCP adapter:
 
-- `native_browser_open`, `shared_browser_status`, control acquire/release, navigation and native tab tools.
+- `native_browser_open`, `shared_browser_status`, navigation and native tab tools.
+- `native_browser_cursor` moves the visible Agent pointer or clicks at viewport CSS coordinates. Pass `browserId` and `generation` from current status, `x`, `y`, and `action: "move" | "click"`. Native pointer automation also displays the pointer, including in mobile broadcasts.
 - `native_browser_automation` for snapshots, click/fill/type, keyboard, wait, screenshot, upload/select, hover/drag, console/network logs, scrolling and resizing.
 - `evaluate_script` for page JavaScript.
 - `browser_cookies` for import/export, setting, deletion and clearing, including HttpOnly/Secure attributes.
 - `cdp_send` and `cdp_events` for guest CDP domains and bounded protocol events.
 
-Acquire control before actions and release afterward. `native_browser_automation` takes `{ name, args }`; use element refs from its current `snapshot`. Native browser IDs come from `shared_browser_tabs`. Browser-level commands cannot close or crash Paseo; manage native tabs through the dedicated tab tools. Cookie and protocol rules are enforced by Chromium. Native CDP is scoped to the registered guest and its owning window/workspace. Uploads use the desktop's filesystem and Paseo's workspace path checks.
+Control is shared automatically. Older acquire/release tool calls remain compatible and do not lock out other participants. `native_browser_automation` takes `{ name, args }`; use element refs from its current `snapshot`. Native browser IDs come from `shared_browser_tabs`. Browser-level commands cannot close or crash Paseo; manage native tabs through the dedicated tab tools. Cookie and protocol rules are enforced by Chromium. Native CDP is scoped to the registered guest and its owning window/workspace. Uploads use the desktop's filesystem and Paseo's workspace path checks.
 
 Installation writes runtime adapters under `$PASEO_HOME/plugin-data/paseo-browser/`. The managed skill under `agent-skills/paseo-browser` is installed into the local agent skill directories. Existing agent sessions need reloading to discover the native adapter. The skill is scoped to live page interaction, not code-only work or plugin configuration. Browser tools remain available without modifying agent system prompts. Existing chats can retain instructions loaded before this update. Unrelated MCP servers and user prompts are preserved.
 
@@ -117,7 +120,7 @@ npm run test:ui
 PASEO_ELECTRON_BINARY=/path/to/electron npm run test:native
 ```
 
-The native integration test uses a separate Electron process and profile, real WebViews and CDP, a real MCP adapter, and a phone-sized Chrome client. It checks native snapshots/screenshots/tabs, HttpOnly cookies, mobile touch, lease fencing, and fresh frames while the desktop pane is parked. Set `PASEO_CHECKOUT` to the Paseo source checkout containing the bridge patch; it defaults to `../paseo`. This validates a compact web client, not physical iOS/Android hardware.
+The native integration test uses a separate Electron process and profile, real WebViews and CDP, a real MCP adapter, and a phone-sized Chrome client. It checks native snapshots/screenshots/tabs, HttpOnly cookies, mobile touch, shared agent input, the visible agent cursor, and fresh frames while the desktop pane is parked. Set `PASEO_CHECKOUT` to the Paseo source checkout containing the bridge patch; it defaults to `../paseo`. This validates a compact web client, not physical iOS/Android hardware.
 
 `test:shared` and `test:ui` cover the retained legacy browser mode. Generated runtimes, local machine paths, node_modules and test artifacts are excluded from the
 package or Git. The listing screenshots in `assets/` are intentionally shipped.
@@ -142,6 +145,6 @@ personal page content from logs and screenshots.
 Licensed under [MIT](LICENSE). Shared Browser attribution is in
 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md); the desktop integration retains Paseo's licenses.
 
-Agents can also use `browser_storage` for local and session storage, `browser_dialog` to answer JavaScript dialogs, `browser_emulate` for device metrics, timezone, location and media preferences, and `browser_network` for offline mode, throttling, headers, cache and URL blocking. Workspace mode requires a page CDP target ID; native mode uses the selected tab and requires the built-in Desktop DevTools API for dialog, emulation and network operations. These tools respect the existing control lease.
+Agents can also use `browser_storage` for local and session storage, `browser_dialog` to answer JavaScript dialogs, `browser_emulate` for device metrics, timezone, location and media preferences, and `browser_network` for offline mode, throttling, headers, cache and URL blocking. Workspace mode requires a page CDP target ID; native mode uses the selected tab and requires the built-in Desktop DevTools API for dialog, emulation and network operations. These tools use the same authenticated, ordered command path.
 
 `browser_inspect` reads element HTML, attributes, computed CSS and geometry by CSS selector, including pseudo-element styles, without the native desktop bridge. `browser_dom` exposes the DevTools document tree, queries, box model and live DOM editing. `browser_css` reads matched/inherited rules, computed and inline styles, stylesheet sources and supports live CSS edits and forced hover/focus states. The latter two require the Desktop DevTools API in native mode. General CDP commands and events remain available for Network, Debugger, Performance, Profiler and Accessibility. Live edits do not change source files.

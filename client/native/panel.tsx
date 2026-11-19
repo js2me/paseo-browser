@@ -5,7 +5,6 @@ import { AppState, ScrollView, Pressable, Text, TextInput, View } from "react-na
 import { type PluginWorkspacePanelProps, useRpc, useTabState } from "@getpaseo/plugin/client";
 import {
   nativeActionRpc,
-  nativeControlRpc,
   nativeWatchRpc,
   type NativeState,
 } from "../../shared/native/contracts";
@@ -15,6 +14,8 @@ import { BrowserFrameImage } from "../workspace/browser-frame-image";
 import { useBrowserFrameBuffer } from "../workspace/use-browser-frame-buffer";
 import type { BrowserFrame } from "../../shared/workspace/browser";
 import type { FrameCandidate } from "../workspace/browser-frame-buffer";
+import { ChromeIconButton } from "../workspace/browser-chrome";
+import { createStyles } from "../workspace/browser-panel-styles";
 import { nativeFrameCandidate } from "./frame-candidate";
 
 const nativeTabState = z.object({ url: z.string().default("about:blank") });
@@ -25,6 +26,7 @@ export function NativeBrowserPanel({
   tab,
   service,
 }: PluginWorkspacePanelProps & { service?: NativeDesktopService }) {
+  const styles = useMemo(() => createStyles(theme, layout.compact), [theme, layout.compact]);
   const foreground = { color: theme.colors.foreground };
   const [active, setActive] = useState(
     AppState.currentState === "active" || AppState.currentState === null,
@@ -60,7 +62,6 @@ export function NativeBrowserPanel({
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const error = actionError ?? connectionError;
-  const [controller, setController] = useState<string | null>(null);
   const [urlDraft, setUrl] = useState<string | null>(null);
   const [remembered, setRemembered] = useTabState(tab, nativeTabState, { url: "about:blank" });
   const url = urlDraft ?? (state?.url.startsWith("http") ? state.url : "");
@@ -72,32 +73,8 @@ export function NativeBrowserPanel({
   }, [state?.url]);
   const [imageSize, setImageSize] = useState({ width: 0, height: 0 });
   const watch = useRpc(nativeWatchRpc);
-  const control = useRpc(nativeControlRpc);
   const action = useRpc(nativeActionRpc);
 
-  const own = controller === clientId;
-  const ownRef = useRef(own);
-  ownRef.current = own;
-  const alive = useRef(true);
-  useEffect(() => {
-    alive.current = true;
-    return () => {
-      alive.current = false;
-      if (ownRef.current)
-        void control({ workspaceId, viewerId: clientId, action: "release" }).catch(() => {});
-    };
-  }, [workspaceId, clientId, control]);
-  const changeControl = () => {
-    setActionError(null);
-    void control({ workspaceId, viewerId: clientId, action: own ? "release" : "acquire" })
-      .then((result) => {
-        if (alive.current && (desktop || activeRef.current)) setController(result.controller);
-        else void control({ workspaceId, viewerId: clientId, action: "release" }).catch(() => {});
-      })
-      .catch((error) => {
-        if (alive.current) setActionError(String(error));
-      });
-  };
   useEffect(() => {
     if (!desktop) return;
     if (!service) {
@@ -106,7 +83,6 @@ export function NativeBrowserPanel({
     }
     return service.attach(workspaceId, host.current, remembered.url, (snapshot) => {
       setState(snapshot.state);
-      setController(snapshot.controller);
       setConnectionError(snapshot.error);
     });
   }, [desktop, workspaceId, clientId, service]);
@@ -114,8 +90,6 @@ export function NativeBrowserPanel({
     if (desktop) return;
     if (!active) {
       reset();
-      if (ownRef.current)
-        void control({ workspaceId, viewerId: clientId, action: "release" }).catch(() => {});
       return;
     }
     let stopped = false;
@@ -129,7 +103,6 @@ export function NativeBrowserPanel({
         stateRef.current = reply.state;
         setState(reply.state);
         discardObsoletePending();
-        setController(reply.controller);
         if (reply.frame) {
           sequence = reply.frame.sequence;
           receive(nativeFrameCandidate(reply.frame, frameScope));
@@ -162,10 +135,6 @@ export function NativeBrowserPanel({
       | "tabs.close",
     input: Record<string, unknown> = {},
   ) => {
-    if (!ownRef.current) {
-      setActionError("Take control before opening a website or interacting with this tab.");
-      return;
-    }
     try {
       setActionError(null);
       await action({ workspaceId, viewerId: clientId, operation, input });
@@ -176,10 +145,13 @@ export function NativeBrowserPanel({
   };
   return (
     <View style={{ flex: 1, backgroundColor: theme.colors.surface0 }}>
-      <View style={{ flexDirection: "row", gap: 8, padding: 8, alignItems: "center" }}>
-        <Pressable accessibilityRole="button" onPress={changeControl}>
-          <Text style={foreground}>{own ? "Release" : "Take control"}</Text>
-        </Pressable>
+      <View style={[styles.chrome, styles.addressRow]}>
+        <ChromeIconButton styles={styles} theme={theme} label="Back" icon="ArrowLeft"
+          disabled={!state?.canGoBack} onPress={() => void run("back")} />
+        <ChromeIconButton styles={styles} theme={theme} label="Forward" icon="ArrowRight"
+          disabled={!state?.canGoForward} onPress={() => void run("forward")} />
+        <ChromeIconButton styles={styles} theme={theme} label="Reload" icon="RotateCw"
+          disabled={!state} onPress={() => void run("reload")} />
         <TextInput
           accessibilityLabel="Native browser address"
           value={url}
@@ -194,25 +166,28 @@ export function NativeBrowserPanel({
             minWidth: 0,
             borderColor: theme.colors.border,
             borderWidth: 1,
-            padding: 8,
+            paddingHorizontal: 10,
+            height: layout.compact ? 40 : 34,
+            borderRadius: 10,
+            backgroundColor: theme.colors.surface1,
           }}
         />
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Open website"
-          disabled={!own || !url.trim() || !state}
-          style={{ opacity: own && url.trim() && state ? 1 : 0.5 }}
+          disabled={!url.trim() || !state}
+          style={{ opacity: url.trim() && state ? 1 : 0.5, minHeight: layout.compact ? 40 : 30, minWidth: 36, paddingHorizontal: 10, borderRadius: 8, alignItems: "center", justifyContent: "center", backgroundColor: theme.colors.accent }}
           onPress={() => void run("navigate", { url })}
         >
-          <Text style={foreground}>Go</Text>
+          <Text style={{ color: theme.colors.accentForeground, fontSize: 13, fontWeight: "600" }}>Go</Text>
         </Pressable>
         {desktop && (
           <Pressable
             accessibilityRole="button"
             accessibilityLabel="Open Chrome DevTools"
-            accessibilityHint="Take control first, then inspect the selected browser tab"
-            disabled={!own || !state || !service}
-            style={{ opacity: own && state && service ? 1 : 0.5 }}
+            accessibilityHint="Inspect the selected browser tab"
+            disabled={!state || !service}
+            style={{ opacity: state && service ? 1 : 0.5, minHeight: 30, paddingHorizontal: 8, alignItems: "center", justifyContent: "center" }}
             onPress={() => {
               try {
                 setActionError(null);
@@ -226,33 +201,28 @@ export function NativeBrowserPanel({
           </Pressable>
         )}
       </View>
-      {!own && (
-        <Text style={{ color: theme.colors.foregroundMuted, paddingHorizontal: 8, paddingBottom: 8 }}>
-          Take control to open a website or interact with this tab.
-        </Text>
-      )}
       {state?.tabs && (
         <ScrollView horizontal style={{ maxHeight: 38 }}>
           {state.tabs.map((tab) => (
             <Pressable
               key={tab.browserId}
-              disabled={!own}
+              disabled={!state}
               onPress={() => void run("tabs.select", { tabId: tab.browserId })}
               style={{
-                padding: 8,
+                paddingHorizontal: 12, paddingVertical: 8, borderRadius: 8, margin: 3,
                 backgroundColor:
                   tab.browserId === state.browserId ? theme.colors.surface1 : theme.colors.surface0,
               }}
             >
-              <Text numberOfLines={1} style={foreground}>
+              <Text numberOfLines={1} style={[foreground, { maxWidth: layout.compact ? 140 : 220, fontSize: 13 }]}>
                 {tab.title || "New tab"}
               </Text>
             </Pressable>
           ))}
-          <Pressable disabled={!own} onPress={() => void run("tabs.create", {})}>
+          <Pressable disabled={!state} onPress={() => void run("tabs.create", {})}>
             <Text style={{ ...foreground, padding: 8 }}>+</Text>
           </Pressable>
-          <Pressable disabled={!own} onPress={() => void run("tabs.close", {})}>
+          <Pressable disabled={!state} onPress={() => void run("tabs.close", {})}>
             <Text style={{ ...foreground, padding: 8 }}>×</Text>
           </Pressable>
         </ScrollView>
@@ -271,7 +241,7 @@ export function NativeBrowserPanel({
           onLayout={(event) => setImageSize(event.nativeEvent.layout)}
           onPress={(event) => {
             if (
-              !own || empty ||
+              empty ||
               !frame ||
               frame.sessionId !== state?.browserId ||
               frame.navigationGeneration !== state?.generation ||
@@ -316,7 +286,7 @@ export function NativeBrowserPanel({
             >
               <Text style={foreground}>No website open</Text>
               <Text style={{ color: theme.colors.foregroundMuted, marginTop: 8 }}>
-                Enter an address and press Go after taking control.
+                Enter an address and press Go.
               </Text>
             </View>
           )}
@@ -325,7 +295,7 @@ export function NativeBrowserPanel({
           )}
         </Pressable>
       )}
-      {!desktop && own && (
+      {!desktop && (
         <View style={{ flexDirection: "row", gap: 8, padding: 8 }}>
           <TextInput
             accessibilityLabel="Type in browser"
@@ -371,7 +341,7 @@ export function NativeBrowserPanel({
         {desktop
           ? "Native Chromium"
           : `Live desktop broadcast${layout.compact ? "" : " · same browser session"}`}{" "}
-        · {state?.title || state?.url || "No page"}
+        · Shared control · {state?.title || state?.url || "No page"}
         {desktop && state && !state.cdp ? " · Update Paseo Desktop for full DevTools" : ""}
       </Text>
     </View>

@@ -28,6 +28,7 @@ const output = await build({
   alias: {
     "react-native": "react-native-web",
     "@getpaseo/plugin/client": resolve("tests/ui/host-hooks.jsx"),
+    "@getpaseo/plugin/client/ui": resolve("tests/ui/host-ui.jsx"),
   },
 });
 const errors: string[] = [];
@@ -150,7 +151,10 @@ try {
     return JSON.parse(result.content[0].text);
   };
   await call("native_browser_open", { url: `${url}/fixture` });
-  await call("shared_browser_acquire_control");
+  const cursorState = await call("shared_browser_status");
+  await call("native_browser_cursor", { browserId: cursorState.state.browserId,
+    generation: cursorState.state.generation, x: 40, y: 50, action: "move" });
+  assert.equal(await call("evaluate_script", { function: '() => Boolean(window.__paseoAgentCursor?.isConnected)' }), true);
   const inspection = await call("browser_inspect", { selector: "h1", properties: ["display", "font-size"] });
   assert.match(inspection.html, /Real native Chromium/);
   assert.equal(inspection.computedStyle.display, "block");
@@ -225,7 +229,6 @@ try {
     function:
       '() => {const r=document.querySelector("button").getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}}',
   });
-  await call("shared_browser_release_control");
   mobile = await puppeteer.launch({ executablePath: "/usr/bin/google-chrome", headless: true });
   const page = await mobile.newPage();
   await page.setViewport({ width: 390, height: 844 });
@@ -243,13 +246,10 @@ try {
   }
   assert.ok(paintedFrames.size>=15,`Native frames repeated stale pixels: ${paintedFrames.size}`);
   assert.ok(sequences.size >= 15, `Expected fresh MJPEG frames, got ${sequences.size}. ${log}`);
-  await page.click("text/Take control");
-  await page.waitForFunction('document.body.textContent.includes("Release")');
-  const denied: any = await mcp.callTool({
-    name: "evaluate_script",
-    arguments: { function: '() => document.title="WRONG"' },
+  const alongside: any = await mcp.callTool({
+    name: "evaluate_script", arguments: { function: '() => document.title' },
   });
-  assert.equal(denied.isError, true);
+  assert.ok(!alongside.isError, 'Agent remains available while the mobile viewer interacts');
   await mkdir("artifacts", { recursive: true });
   await page.screenshot({ path: resolve("artifacts/native-mobile.png") });
   const mirror = await page.$('[aria-label="Live native browser"]');
@@ -270,20 +270,17 @@ try {
   await page.mouse.click(tapX, tapY);
   await pause(500);
 
-  await page.click("text/Release");
-  await call("shared_browser_acquire_control");
   assert.equal(
     await call("evaluate_script", {
       function: '() => document.querySelector("button").textContent',
     }),
     "Native click",
   );
-  await call("shared_browser_release_control");
   const white=await page.evaluate(`(()=>{const image=document.images[0];const canvas=document.createElement('canvas');canvas.width=image.naturalWidth;canvas.height=image.naturalHeight;const context=canvas.getContext('2d');context.drawImage(image,0,0);const bytes=context.getImageData(0,0,canvas.width,canvas.height).data;let count=0;for(let i=0;i<bytes.length;i+=4)if(bytes[i]>230&&bytes[i+1]>230&&bytes[i+2]>230)count++;return count/(bytes.length/4);})()`);
   assert.ok(Number(white)>0.5,`Parked native page lost its painted content: white fraction=${white}`);
   assert.deepEqual(errors, []);
   console.log(
-    `PASS: native Electron WebView, native snapshots/screenshots/tabs, DOM/CSS, CDP/HttpOnly cookies, dialog replies and debugger resume, parked-pane mobile mirror and touch;  ${sequences.size} fresh frames/3s; human control fences agent tools.`,
+    `PASS: native Electron WebView, native snapshots/screenshots/tabs, DOM/CSS, CDP/HttpOnly cookies, dialog replies and debugger resume, parked-pane mobile mirror and touch;  ${sequences.size} fresh frames/3s; human and agent input share the same session.`,
   );
 } catch (error) {
   console.error(log.slice(-10_000));

@@ -22,7 +22,6 @@ type Workspace = {
   viewers: Map<string, number>;
   control: { id: string; human: boolean; until: number } | null;
   error: string | null;
-  takeover: string | null;
 };
 const OWNER_TTL = 5_000;
 const VIEWER_TTL = 2_500;
@@ -76,18 +75,16 @@ export class NativeRelay {
         viewers: new Map(),
         control: null,
         error: null,
-        takeover: null,
       };
       this.workspaces.set(id, workspace);
     }
-    if (workspace.control && workspace.control.until <= this.now() && !workspace.takeover)
+    if (workspace.control && workspace.control.until <= this.now())
       workspace.control = null;
     if (workspace.clientId && workspace.seenAt + OWNER_TTL < this.now()) {
       workspace.clientId = null;
       workspace.state = null;
       workspace.frame = null;
       workspace.control = null;
-      workspace.takeover = null;
       workspace.error =
         "Desktop browser disconnected. Waiting for a connected desktop to host it again.";
       for (const pending of workspace.pending.values()) {
@@ -118,6 +115,21 @@ export class NativeRelay {
         requestedWorkspaceIds.push(id);
     }
     return { workspaceIds, requestedWorkspaceIds };
+  }
+  /** Release only an idle owner, atomically with command/viewer admission. */
+  release(workspaceId: string, clientId: string) {
+    const workspace = this.workspaces.get(workspaceId);
+    if (!workspace || workspace.clientId !== clientId) return { released: false };
+    this.workspace(workspaceId);
+    if (workspace.pending.size || workspace.control ||
+      [...workspace.viewers.values()].some((until) => until > this.now()))
+      return { released: false };
+    workspace.clientId = null;
+    workspace.state = null;
+    workspace.frame = null;
+    workspace.viewers.clear();
+    workspace.error = null;
+    return { released: true };
   }
   exchange(input: {
     clientId: string;
@@ -172,16 +184,6 @@ export class NativeRelay {
       for (const next of workspace.pending.values()) {
         const unblocker = canUnblock(next.command);
         if (next.dispatched || (inFlight && !unblocker)) continue;
-        if (workspace.takeover && (!unblocker || next.owner !== workspace.control?.id)) continue;
-        const requiresControl = !["tabs.list", "open"].includes(next.command.operation);
-        const openingControlledBrowser =
-          next.command.operation === "open" && workspace.control !== null;
-        if ((requiresControl || openingControlledBrowser) && workspace.control?.id !== next.owner) {
-          clearTimeout(next.timer);
-          workspace.pending.delete(next.command.id);
-          next.reject(Error("Browser control changed before dispatch"));
-          continue;
-        }
         next.dispatched = true;
         commands.push(next.command);
         break;
@@ -214,28 +216,14 @@ export class NativeRelay {
     };
   }
   async control(workspaceId: string, id: string, human: boolean, action: "acquire" | "release") {
+    if (this.stopped) throw Error("Native browser relay stopped");
     const workspace = this.workspace(workspaceId);
-    if (action === "release") {
-      if (workspace.control?.id === id) workspace.control = null;
-    } else {
-      if (workspace.takeover && workspace.takeover !== id)
-        throw Error("Browser control transfer is pending");
-      if (workspace.control && workspace.control.id !== id && (!human || workspace.control.human))
-        throw Error("Browser is controlled by another participant");
-      for (;;) {
-        if (this.stopped) throw Error("Native browser relay stopped");
-        const pending = [...workspace.pending.values()].find((p) => p.dispatched && p.owner !== id);
-        if (!pending) break;
-        workspace.takeover = id;
-        await pending.settled;
-      }
-      if (workspace.control && workspace.control.id !== id && (!human || workspace.control.human))
-        throw Error("Browser is controlled by another participant");
-      workspace.control = { id, human, until: this.now() + CONTROL_TTL };
-      workspace.takeover = null;
-    }
+    // Compatibility for older tool clients; participation never locks out another viewer.
+    if (action === "acquire") workspace.control = { id, human, until: this.now() + CONTROL_TTL };
+    else if (workspace.control?.id === id) workspace.control = null;
     return { controller: workspace.control?.id ?? null };
   }
+
   async command(
     workspaceId: string,
     id: string,
@@ -244,13 +232,6 @@ export class NativeRelay {
   ) {
     if (this.stopped) throw Error("Native browser relay stopped");
     const workspace = this.workspace(workspaceId);
-    if (operation === "open" && workspace.control && workspace.control.id !== id)
-      throw Error("Browser is controlled by another participant");
-    if (!["status", "tabs.list", "open"].includes(operation) && workspace.control?.id !== id)
-      throw Error(
-        "Acquire native browser control first; another participant may control the browser",
-      );
-    if (workspace.control?.id === id) workspace.control.until = this.now() + CONTROL_TTL;
     if (operation === "status")
       return {
         state: workspace.state,

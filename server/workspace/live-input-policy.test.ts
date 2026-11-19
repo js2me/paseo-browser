@@ -815,7 +815,7 @@ describe("owned ordered live input", () => {
     state.manager.disconnect();
   });
 
-  it("idle timeout fires without another request and takeover/detach release immediately", async () => {
+  it("idle timeout and owner departure release input, while another participant joining preserves it", async () => {
     vi.useFakeTimers();
     const timed = await fixture();
     await timed.begin();
@@ -832,7 +832,8 @@ describe("owned ordered live input", () => {
       } else if (operation === "detach") await state.manager.detach(state.context.viewerToken);
       else
         await state.manager.releaseControl(state.context.viewerToken, state.context.controlToken);
-      expect(state.calls.filter((call) => call.operation === "input.end")).toHaveLength(1);
+      expect(state.calls.filter((call) => call.operation === "input.end")).toHaveLength(operation === "takeover" ? 0 : 1);
+      if (operation === "takeover") await expect(state.update({ kind: "move", point: point() })).resolves.toBeDefined();
       state.manager.disconnect();
     }
   });
@@ -955,4 +956,41 @@ it("requests JPEG100 and JPEG85 independently from the default-quality stream", 
   } finally {
     f.manager.disconnect();
   }
+});
+
+it("preserves a human drag when an agent joins and refuses peer input until release", async () => {
+  const state = await fixture();
+  try {
+    await state.begin();
+    await state.update({ kind: "down", button: "left", clickCount: 1, point: point() }, true);
+    const agent = await state.manager.attach("owned-workspace", "Agent");
+    const control = await state.manager.acquireControl(agent.viewerToken);
+    const observation = await state.manager.capture(agent.viewerToken);
+    const input = { viewerToken: agent.viewerToken, controlToken: control.controlToken,
+      expected: { ...state.context.expected }, target: observation.frame!,
+      event: { kind: "move" as const, point: point(100, 100) } };
+    await expect(state.manager.sendInput(input)).rejects.toThrow("holding input");
+    expect(state.calls.filter(call => call.operation === "input.end")).toHaveLength(0);
+    await state.update({ kind: "up", button: "left", clickCount: 1, point: point() });
+    const refreshed = await state.manager.capture(agent.viewerToken);
+    const reply = await state.manager.sendInput({ ...input, target: refreshed.frame! });
+    expect(reply.state.agentCursor).toMatchObject({ x: 200, y: 200, label: "Agent" });
+    expect((await state.manager.status(state.context.viewerToken)).state.controller).toBe("self");
+    await state.manager.releaseControl(agent.viewerToken, control.controlToken);
+    expect((await state.manager.status(state.context.viewerToken)).state.controller).toBe("self");
+  } finally { state.manager.disconnect(); }
+});
+
+it("expires an idle agent pointer without revoking participant input", async () => {
+  let now = 1_000;
+  const state = await fixture({ now: () => now });
+  try {
+    await state.manager.sendInput({ ...state.context, target: state.target,
+      event: { kind: "move", point: point() } });
+    expect((await state.manager.status(state.context.viewerToken)).state.agentCursor).not.toBeNull();
+    now += 8_001;
+    const reply = await state.manager.status(state.context.viewerToken);
+    expect(reply.state.agentCursor).toBeNull();
+    expect(reply.state.controller).toBe("self");
+  } finally { state.manager.disconnect(); }
 });

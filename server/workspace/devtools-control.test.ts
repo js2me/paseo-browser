@@ -2,7 +2,7 @@ import { expect, it } from 'vitest';
 import { SessionManager } from './browser-policy';
 import type { JsonValue } from './runtime-protocol';
 
-it('queues human takeover behind an in-flight DevTools call, then rejects the former agent lease', async () => {
+it('serializes participant admission with DevTools while preserving both capabilities', async () => {
   const entered = Promise.withResolvers<void>();
   const finish = Promise.withResolvers<void>();
   let publications = 0;
@@ -33,7 +33,8 @@ it('queues human takeover behind an in-flight DevTools call, then rejects the fo
     expect(acquired).toBe(false);
     finish.resolve(); await pending; await takeover;
     expect(acquired).toBe(true);
-    await expect(manager.runDevtools(agent.viewerToken, lease.controlToken, { name: 'evaluate_script' })).rejects.toThrow(/lease/);
-    expect(publications).toBe(1);
+    await expect(manager.runDevtools(agent.viewerToken, lease.controlToken, { name: 'evaluate_script' })).resolves.toEqual({ content: [] });
+    expect((await manager.status(human.viewerToken)).state.controller).toBe('self');
+    expect(publications).toBe(2);
   } finally { finish.resolve(); manager.disconnect(); }
 });

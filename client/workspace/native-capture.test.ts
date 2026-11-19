@@ -141,3 +141,32 @@ it("supports mobile taps, text and keys through the native guest without CDP", a
   await expect(input({kind:"tap", x:0, y:0, generation:-1})).rejects.toThrow("Page changed");
   await expect(input({kind:"tap", x:-1, y:0})).rejects.toThrow("Invalid input coordinates");
 });
+
+it.each([true, false])("moves the agent cursor without clicking and fences stale pages (CDP=%s)", async (bridge) => {
+  const { controller, guest, sendNativeCommand } = await fixture(bridge);
+  const executeJavaScript = vi.fn().mockResolvedValue(undefined);
+  Object.assign(guest, { executeJavaScript });
+  const input = { browserId: "browser", generation: controller.state()!.generation, x: 42, y: 75, action: "move" };
+  await controller.execute({ id: "cursor", operation: "cursor", input });
+  expect(executeJavaScript).toHaveBeenCalledWith(expect.stringContaining("__paseoAgentCursor"));
+  if (bridge) expect(sendNativeCommand).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+    method: "Input.dispatchMouseEvent", params: { type: "mouseMoved", x: 42, y: 75, button: "none" },
+  }));
+  else expect(guest.sendInputEvent).toHaveBeenCalledExactlyOnceWith({ type: "mouseMove", x: 42, y: 75 });
+  await expect(controller.execute({ id: "old", operation: "cursor", input: { ...input, generation: -1 } })).rejects.toThrow("Page changed");
+  await expect(controller.execute({ id: "outside", operation: "cursor", input: { ...input, x: 99999 } })).rejects.toThrow("coordinates");
+  expect(executeJavaScript).toHaveBeenCalledTimes(1);
+});
+
+it("does not wait for cursor overlays on a paused page and bounds pending overlay work", async () => {
+  const { controller, guest, sendNativeCommand } = await fixture();
+  const overlay = Promise.withResolvers<void>();
+  const executeJavaScript = vi.fn().mockReturnValue(overlay.promise);
+  Object.assign(guest, { executeJavaScript });
+  const input = { browserId: "browser", generation: controller.state()!.generation, x: 42, y: 75, action: "move" };
+  await controller.execute({ id: "first", operation: "cursor", input });
+  await controller.execute({ id: "second", operation: "cursor", input: { ...input, x: 100 } });
+  expect(sendNativeCommand).toHaveBeenCalledTimes(2);
+  expect(executeJavaScript).toHaveBeenCalledTimes(1);
+  overlay.resolve();
+});

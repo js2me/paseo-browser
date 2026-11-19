@@ -7,7 +7,9 @@ import { build } from 'esbuild';
 import puppeteer from 'puppeteer-core';
 import { createRuntimeOwner } from '../server/workspace/runtime-owner';
 import { startSupervisorServer, resolveSupervisorPaths } from '../server/workspace/supervisor';
-import { SupervisorClient } from '../server/workspace/supervisor-client';
+import { agentCursorExpression } from '../shared/native/agent-cursor';
+import { randomBytes } from "node:crypto";
+import { AgentSupervisorClient, SupervisorClient } from '../server/workspace/supervisor-client';
 import { resolveBrowserRuntimeRoot } from '../server/workspace/runtime-path';
 
 const assets = resolveBrowserRuntimeRoot(process.env.PASEO_HOME ?? join(homedir(), '.paseo'));
@@ -49,22 +51,44 @@ const artifactDir=resolve('artifacts'); await mkdir(artifactDir,{recursive:true}
 try {
   const seeded = await bridge.requestBrowser<{viewerToken:string}>('attach', {workspaceId:'ui-workspace',viewerLabel:'Agent-opened browser fixture'});
   await bridge.requestBrowser('detach', {viewerToken:seeded.viewerToken});
-  for (const [name,width,height,theme] of [['desktop-auto',1440,1000,'dark'],['desktop-dark',1440,1000,'dark'],['mobile-auto',390,844,'dark'],['mobile-dark',390,844,'dark'],['desktop-light',1280,900,'light']] as const) {
+  for (const [name,width,height,theme] of [['desktop-dark',1440,1000,'dark'],['mobile-dark',390,844,'dark'],['desktop-light',1280,900,'light'],['mobile-light',390,844,'light']] as const) {
     const page=await browser.newPage(); page.on('pageerror',(error)=>errors.push(String(error)));
     await page.setViewport({width,height,deviceScaleFactor:1});
     await page.goto(`${url}/?theme=${theme}&auto=${name.endsWith('-auto')?'1':'0'}`);
     if (name.endsWith('-auto')) await page.waitForFunction('document.body.textContent.includes("Agent conversation")');
     await page.waitForFunction('Array.from(document.images).some(image=>image.naturalWidth>0)',{timeout:25_000});
-    await page.waitForSelector('[aria-label="Take control"]',{timeout:10_000});
-    await page.click('[aria-label="Take control"]');
-    await page.waitForSelector('[aria-label="Release"]',{timeout:10_000});
+    await page.waitForSelector('[aria-label="Shared control with agents"]', { timeout: 10_000 });
+    assert.equal(await page.$('[aria-label="Take control"]'), null);
+    assert.equal(await page.$('[aria-label="Release"]'), null);
+    // Automatic capture density settles after the first decoded frame.
+    await page.waitForFunction('Array.from(document.images).some(image=>image.naturalWidth===2560)', { timeout: 10_000 });
+    const ticket = randomBytes(32).toString('base64url');
+    await bridge.issueAgentTicket(ticket);
+    await bridge.bindAgentTicket(ticket, `ui-agent-${name}`, 'ui-workspace');
+    const agent = new AgentSupervisorClient({ ticket, paths: resolveSupervisorPaths(home) });
+    await agent.open();
+    try {
+      await agent.request('capture', {});
+      const moved = await agent.request('input', { event: { kind: 'move', point: { x: 420, y: 240, width: 1280, height: 800 } } });
+      assert.ok((moved as any).state.agentCursor);
+      try { await page.waitForSelector('[aria-label="Agent cursor"]', { timeout: 10_000 }); } catch (error) { await page.screenshot({ path: join(artifactDir, 'cursor-failure.png') }); console.log(await page.evaluate('document.body.innerText')); throw error; }
+    } finally { agent.disconnect(); }
     await page.screenshot({path:join(artifactDir,`${name}.png`)});
     const overflow=await page.evaluate('document.documentElement.scrollWidth>innerWidth+2'); assert.equal(overflow,false,`${name}: page overflows`);
-    await page.click('[aria-label="Release"]');
-    await page.waitForSelector('[aria-label="Take control"]',{timeout:10_000});
     await page.close();
-    console.log(`PASS: ${name}, live Chrome frame, acquire/release and no horizontal overflow.`);
+    console.log(`PASS: ${name}, live Chrome frame, shared agent input, visible cursor and no horizontal overflow.`);
   }
+  const cursorPage = await browser.newPage();
+  await cursorPage.goto(`${url}/fixture`);
+  const point = await cursorPage.$eval('button', button => {
+    const rect = button.getBoundingClientRect(); return { x: rect.x + 10, y: rect.y + 10 };
+  });
+  await cursorPage.evaluate(agentCursorExpression(point.x, point.y));
+  assert.equal(await cursorPage.evaluate(({ x, y }) => (globalThis as any).document.elementFromPoint(x, y)?.tagName, point), 'BUTTON');
+  await cursorPage.mouse.click(point.x, point.y);
+  assert.equal(await cursorPage.$eval('button', button => button.textContent), 'Clicked in Chrome');
+  await cursorPage.screenshot({ path: join(artifactDir, 'native-agent-cursor.png') });
+  await cursorPage.close();
   assert.deepEqual(errors,[]); assert.equal(failedRpc,false,'UI RPC errors');
 } finally {
   await browser.close(); bridge.disconnect(); await running.close(); http.closeAllConnections();

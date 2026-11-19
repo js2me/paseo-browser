@@ -6,6 +6,7 @@ import {
   nativeControlRpc,
   nativeExchangeRpc,
   nativePresenceRpc,
+  nativeReleaseRpc,
   nativeWatchRpc,
 } from "../../shared/native/contracts";
 export function contributeNative(server: PluginServerContext) {
@@ -13,6 +14,7 @@ export function contributeNative(server: PluginServerContext) {
   const ready = relay.listen();
   server.handle(nativeExchangeRpc, (input) => relay.exchange(input));
   server.handle(nativePresenceRpc, () => relay.presence());
+  server.handle(nativeReleaseRpc, (input) => relay.release(input.workspaceId, input.clientId));
   server.handle(nativeWatchRpc, (input) =>
     relay.watch(input.workspaceId, input.viewerId, input.afterSequence),
   );

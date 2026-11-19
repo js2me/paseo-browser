@@ -64,35 +64,23 @@ it("broadcasts the exact registered native guest and requests capture only while
   expect(other.accepted).toBe(false);
   expect(relay.watch("workspace", phone, 0).state?.browserId).toBe("native-one");
 });
-it("dispatches once, queues human takeover behind native execution, then fences queued agent actions", async () => {
+it("orders agent and human commands without acquiring or transferring control", async () => {
   const relay = fixture();
   exchange(relay);
-  await relay.control("workspace", "agent", false, "acquire");
   const first = relay.command("workspace", "agent", "evaluate", { expression: "1" });
-  const queued = relay.command("workspace", "agent", "evaluate", { expression: "2" }).then(
-    () => null,
-    (error) => error.message,
-  );
+  const human = relay.command("workspace", phone, "navigate", { url: "https://example.test" });
+  const last = relay.command("workspace", "agent", "evaluate", { expression: "2" });
   const command = exchange(relay).commands[0];
   expect(command.input).toEqual({ expression: "1" });
   expect(exchange(relay).commands).toEqual([]);
-  let tookControl = false;
-  const takeover = relay.control("workspace", phone, true, "acquire").then(() => {
-    tookControl = true;
-  });
-  await Promise.resolve();
-  expect(tookControl).toBe(false);
-  exchange(relay, [{ id: command.id, result: 1 }]);
+  const second = exchange(relay, [{ id: command.id, result: 1 }]).commands[0];
   expect(await first).toBe(1);
-  await takeover;
-  exchange(relay);
-  expect(await queued).toMatch(/control changed/);
-  await expect(
-    relay.command("workspace", "agent", "cdp_send", { method: "Network.enable" }),
-  ).rejects.toThrow(/control/);
-  await expect(
-    relay.command("workspace", "agent", "open", { url: "https://wrong.test" }),
-  ).rejects.toThrow(/controlled/);
+  expect(second.operation).toBe("navigate");
+  const third = exchange(relay, [{ id: second.id, result: {} }]).commands[0];
+  await human;
+  expect(third.input).toEqual({ expression: "2" });
+  exchange(relay, [{ id: third.id, result: 2 }]);
+  expect(await last).toBe(2);
 });
 it("invalidates a lost desktop and never replays a published mutation on another desktop", async () => {
   let now = 1000;
@@ -255,7 +243,7 @@ it("allows event reads and dialog replies while an earlier command waits, retain
   await navigating;
 });
 
-it("waits for every dispatched command before handing control to a human", async () => {
+it("keeps commands ordered while legacy control calls remain compatible", async () => {
   const relay = fixture();
   exchange(relay);
   await relay.control("workspace", "agent", false, "acquire");
@@ -268,14 +256,14 @@ it("waits for every dispatched command before handing control to a human", async
   exchange(relay, [{ id: evaluation.id, result: 42 }]);
   await evaluating;
   await Promise.resolve();
-  expect(relay.watch("workspace", phone, 0).controller).toBe("agent");
+  expect(relay.watch("workspace", phone, 0).controller).toBe(phone);
   expect(exchange(relay).commands).toEqual([]);
   exchange(relay, [{ id: inspection.id, result: {} }]);
   await inspecting;
   expect(await takeover).toEqual({ controller: phone });
 });
 
-it("keeps timed-out execution tracked until Desktop confirms completion before takeover", async () => {
+it("keeps timed-out execution tracked while participants continue to share control", async () => {
   vi.useFakeTimers();
   const relay = fixture(() => 1000);
   exchange(relay);
@@ -290,8 +278,8 @@ it("keeps timed-out execution tracked until Desktop confirms completion before t
   });
   await vi.advanceTimersByTimeAsync(15_000);
   expect(await result).toContain("timed out");
-  expect(tookControl).toBe(false);
-  expect(relay.watch("workspace", phone, 0).controller).toBe("agent");
+  expect(tookControl).toBe(true);
+  expect(relay.watch("workspace", phone, 0).controller).toBe(phone);
   expect(exchange(relay).commands).toEqual([]);
   exchange(relay, [{ id: command.id, result: { finished: true } }]);
   expect(await takeover).toEqual({ controller: phone });
@@ -313,7 +301,7 @@ it("removes an undispatched timeout without blocking human control", async () =>
 it.each([
   ["browser_dialog", { accept: false }],
   ["cdp_send", { method: "Debugger.resume" }],
-])("dispatches %s during takeover after timeout and lease expiry while fencing ordinary work", async (operation, input) => {
+])("dispatches %s from a participant while paused execution blocks ordinary queued work", async (operation, input) => {
   vi.useFakeTimers();
   let now = 1000;
   const relay = fixture(() => now);
@@ -337,10 +325,11 @@ it.each([
   expect(reply.input).toEqual(input);
   exchange(relay, [{ id: evaluation.id, result: {} }]);
   await Promise.resolve();
-  expect(relay.watch("workspace", phone, 0).controller).toBe("agent");
-  exchange(relay, [{ id: reply.id, result: {} }]);
+  expect(relay.watch("workspace", phone, 0).controller).toBeNull();
+  const next = exchange(relay, [{ id: reply.id, result: {} }]).commands[0];
   await replying;
   expect(await takeover).toEqual({ controller: phone });
-  expect(exchange(relay).commands).toEqual([]);
-  expect(await navigating).toContain("control changed before dispatch");
+  expect(next.operation).toBe("navigate");
+  exchange(relay, [{ id: next.id, result: {} }]);
+  expect(await navigating).toEqual({});
 });

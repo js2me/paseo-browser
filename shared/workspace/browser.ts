@@ -78,6 +78,11 @@ export const browserStateSchema = z.object({
   viewportGeneration: generationSchema,
   devicePresetId: devicePresetIdSchema.nullable(),
   userAgent: z.string().min(1).max(512),
+  agentCursor: z.object({
+    x: z.number().finite().nonnegative(), y: z.number().finite().nonnegative(),
+    label: z.string().max(64), navigationGeneration: generationSchema, viewportGeneration: generationSchema,
+    updatedAt: z.string().datetime(),
+  }).nullable().optional(),
   controller: z.enum(["none", "self", "other"]),
   controllerLabel: z.string().max(64).nullable(),
   controllerExpiresAt: z.string().datetime().nullable(),

@@ -48,11 +48,11 @@ export const advancedToolSchemas = {
 const descriptions = {
   ...browserActionDescriptions,
   cdp_send:
-    "Send any Chrome DevTools Protocol command to this shared workspace Chrome. Omit targetId for browser commands (Target.getTargets, Storage, Browser); use a page targetId from Target.getTargets for Runtime, DOM, Network, Fetch, Debugger, Emulation, etc. Target sessions persist across calls. Enable domain events before reading cdp_events. Requires exclusive workspace control.",
+    "Send any Chrome DevTools Protocol command to this shared workspace Chrome. Omit targetId for browser commands (Target.getTargets, Storage, Browser); use a page targetId from Target.getTargets for Runtime, DOM, Network, Fetch, Debugger, Emulation, etc. Target sessions persist across calls. Enable domain events before reading cdp_events. Works alongside other participants; actions are ordered.",
   cdp_events:
-    "Read buffered CDP events from this workspace connection, including Fetch.requestPaused, Network, console and debugger events. Enable domains with cdp_send first. Use targetId and method to filter. Returns up to 500 events, dropped count, and clears matching events by default. The buffer is bounded; drain promptly. Requires exclusive workspace control.",
+    "Read buffered CDP events from this workspace connection, including Fetch.requestPaused, Network, console and debugger events. Enable domains with cdp_send first. Use targetId and method to filter. Returns up to 500 events, dropped count, and clears matching events by default. The buffer is bounded; drain promptly. Works alongside other participants; actions are ordered.",
   browser_cookies:
-    "Read/export, set/import, delete or clear cookies in the shared workspace Chrome profile, including HttpOnly, Secure, SameSite, expiry and partitioned cookies. get returns CDP cookies; set takes CookieParam objects (name/value plus URL or domain and optional attributes). expires is Unix seconds; omit for session cookies. Extra CDP attributes are passed through. Chrome validates cookie rules. delete requires name and url or domain. clear clears all workspace cookies. Requires exclusive workspace control.",
+    "Read/export, set/import, delete or clear cookies in the shared workspace Chrome profile, including HttpOnly, Secure, SameSite, expiry and partitioned cookies. get returns CDP cookies; set takes CookieParam objects (name/value plus URL or domain and optional attributes). expires is Unix seconds; omit for session cookies. Extra CDP attributes are passed through. Chrome validates cookie rules. delete requires name and url or domain. clear clears all workspace cookies. Works alongside other participants; actions are ordered.",
 };
 export const advancedTools = Object.entries(advancedToolSchemas).map(([name, schema]) => ({
   name,

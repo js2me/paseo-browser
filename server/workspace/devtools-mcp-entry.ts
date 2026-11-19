@@ -21,7 +21,7 @@ async function main() {
   const server = new Server({ name: 'paseo-browser-devtools', version: '0.3.0' }, { capabilities: { tools: {} }, instructions: BROWSER_AGENT_INSTRUCTIONS });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: tools.map((tool) => ({
     ...tool,
-    description: `${tool.description ?? ''}\nOperates on the shared workspace browser. First use shared_browser_acquire_control. DevTools requires exclusive workspace control; it waits for an in-flight tool and refuses while another viewer controls any tab.`,
+    description: `${tool.description ?? ''}\nOperates on the shared workspace browser. Control is shared with the user. Operations run in order; obtain fresh state after another participant changes the page.`,
   })) }));
   server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
     try {
