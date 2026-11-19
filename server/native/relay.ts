@@ -62,7 +62,7 @@ export class NativeRelay {
   private server: Server | null = null;
   private url = "";
   private stopped = false;
-  constructor(private now = Date.now) {}
+  constructor(private now = Date.now, private wakeDesktop?: () => Promise<boolean>) {}
   private workspace(id: string) {
     let workspace = this.workspaces.get(id);
     if (!workspace) {
@@ -91,14 +91,17 @@ export class NativeRelay {
       workspace.error =
         "Desktop browser disconnected. Waiting for a connected desktop to host it again.";
       for (const pending of workspace.pending.values()) {
+        // An explicit opening that never reached Desktop can still start on the
+        // replacement host. Already dispatched mutations must never be replayed.
+        if (!pending.dispatched && pending.command.operation === "open") continue;
         clearTimeout(pending.timer);
+        workspace.pending.delete(pending.command.id);
         pending.reject(
           new Error(
             "Desktop browser disconnected; a dispatched command may have completed. Do not retry mutations automatically.",
           ),
         );
       }
-      workspace.pending.clear();
     }
     return workspace;
   }
@@ -257,11 +260,15 @@ export class NativeRelay {
     if (workspace.pending.size >= 32) throw Error("Native browser queue is full");
     return new Promise<unknown>((resolve, reject) => {
       const completion = Promise.withResolvers<void>();
+      let wakeTimer: ReturnType<typeof setTimeout> | null = null;
+      const clearWakeTimer = () => { if (wakeTimer) clearTimeout(wakeTimer); };
       const accept = (value: unknown) => {
+        clearWakeTimer();
         completion.resolve();
         resolve(value);
       };
       const refuse = (error: Error) => {
+        clearWakeTimer();
         completion.resolve();
         reject(error);
       };
@@ -269,9 +276,12 @@ export class NativeRelay {
       const timer = setTimeout(() => {
         const pending = workspace.pending.get(command.id);
         if (!pending) return;
-        const error = Error(
-          "Native browser command timed out. Keep Paseo Desktop connected to this host so it can start the workspace browser. Dispatched mutations are not retried.",
-        );
+        const browserConnected = workspace.clientId && workspace.seenAt + OWNER_TTL >= this.now();
+        const error = Error(pending.dispatched
+          ? "Native browser execution timed out. This does not mean Desktop disconnected: the page may be paused by a dialog, debugger or request interception. Read events and unblock it; do not retry dispatched mutations automatically."
+          : browserConnected
+            ? "Native browser command timed out in the queue. Desktop is connected; another operation may be waiting for a dialog, debugger or intercepted request."
+            : "Native browser connection timed out. The plugin is running, but no native browser host connected. A Paseo Desktop window must be running and connected to this host. The daemon alone cannot host a native tab.");
         if (pending.dispatched) {
           // The caller's timeout does not end execution on Desktop.
           reject(error);
@@ -289,6 +299,29 @@ export class NativeRelay {
         owner: id,
         settled: completion.promise,
       });
+      if (operation === "open" && this.wakeDesktop) {
+        // First give a connected Desktop's normal cold-start poll time to respond.
+        // Status checks, viewer polls and dispatched operations never launch a GUI.
+        const wakeIfNeeded = () => {
+          const pending = workspace.pending.get(command.id);
+          if (this.stopped || !pending || pending.dispatched) return;
+          const hasDesktop = [...this.workspaces.values()].some(
+            (owner) => owner.clientId && owner.seenAt + OWNER_TTL >= this.now(),
+          );
+          if (hasDesktop) {
+            // A closing window's final heartbeat can remain fresh for a few seconds.
+            wakeTimer = setTimeout(wakeIfNeeded, 1_000);
+            return;
+          }
+          void this.wakeDesktop!().catch((error: unknown) => {
+            if (workspace.pending.get(command.id) !== pending || pending.dispatched) return;
+            workspace.pending.delete(command.id);
+            clearTimeout(pending.timer);
+            pending.reject(Error(`Could not reopen the local Paseo Desktop: ${String(error)}`));
+          });
+        };
+        wakeTimer = setTimeout(wakeIfNeeded, 2_000);
+      }
     });
   }
   async listen() {

@@ -109,6 +109,51 @@ it("invalidates a lost desktop and never replays a published mutation on another
   expect(await result).toMatch(/may have completed/);
   expect(exchange(relay).commands).toEqual([]);
 });
+
+it("reopens a local Desktop only for an explicit undispatched site opening", async () => {
+  vi.useFakeTimers();
+  const wake=vi.fn().mockResolvedValue(true);
+  const relay=new NativeRelay(Date.now,wake);relays.push(relay);
+  await relay.command("workspace","agent","status");
+  await vi.advanceTimersByTimeAsync(3000);
+  expect(wake).not.toHaveBeenCalled();
+  const opening=relay.command("workspace","agent","open",{url:"https://example.test/"});
+  await vi.advanceTimersByTimeAsync(1999);expect(wake).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1);expect(wake).toHaveBeenCalledOnce();
+  const command=exchange(relay).commands[0];
+  expect(command.operation).toBe("open");
+  expect(exchange(relay).commands).toEqual([]);
+  exchange(relay,[{id:command.id,result:{opened:true}}]);await opening;
+});
+
+it("does not launch a GUI for mobile presence or while a connected Desktop cold-starts a tab", async () => {
+  vi.useFakeTimers();
+  const wake=vi.fn().mockResolvedValue(true);
+  const relay=new NativeRelay(()=>1000,wake);relays.push(relay);
+  relay.watch("workspace",phone,0);relay.presence();
+  await vi.advanceTimersByTimeAsync(3000);expect(wake).not.toHaveBeenCalled();
+  exchange(relay);
+  const opening=relay.command("workspace","agent","open",{url:"https://example.test/"});
+  await vi.advanceTimersByTimeAsync(2500);expect(wake).not.toHaveBeenCalled();
+  const command=exchange(relay).commands[0];
+  exchange(relay,[{id:command.id,result:{opened:true}}]);await opening;
+  await vi.advanceTimersByTimeAsync(4000);expect(wake).not.toHaveBeenCalled();
+});
+
+it("waits for a closed Desktop's last heartbeat to expire before reopening it", async () => {
+  vi.useFakeTimers();
+  const wake=vi.fn().mockResolvedValue(true);
+  const relay=new NativeRelay(Date.now,wake);relays.push(relay);
+  exchange(relay);
+  const opening=relay.command("workspace","agent","open",{url:"https://example.test/"});
+  await vi.advanceTimersByTimeAsync(5000);expect(wake).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1000);expect(wake).toHaveBeenCalledOnce();
+  const command=exchange(relay).commands[0];
+  expect(command.operation).toBe("open");
+  expect(exchange(relay).commands).toEqual([]);
+  exchange(relay,[{id:command.id,result:{opened:true}}]);
+  expect(await opening).toEqual({opened:true});
+});
 it("scopes HTTP credentials to their agent and workspace and refuses unauthenticated requests", async () => {
   const relay = fixture();
   await relay.listen();

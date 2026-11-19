@@ -1,5 +1,6 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { NativeRelay } from "./relay";
+import { createLocalDesktopLauncher } from "./desktop-launcher";
 import {
   nativeActionRpc,
   nativeControlRpc,
@@ -8,7 +9,7 @@ import {
   nativeWatchRpc,
 } from "../../shared/native/contracts";
 export function contributeNative(server: PluginServerContext) {
-  const relay = new NativeRelay();
+  const relay = new NativeRelay(Date.now, createLocalDesktopLauncher());
   const ready = relay.listen();
   server.handle(nativeExchangeRpc, (input) => relay.exchange(input));
   server.handle(nativePresenceRpc, () => relay.presence());
