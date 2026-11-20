@@ -18,7 +18,7 @@ import { NativeDesktopService } from "./desktop-service";
 
 afterEach(() => { vi.useRealTimers(); guests.length = 0; });
 
-it("opens DevTools on the selected tab and requires human control", async () => {
+it("opens DevTools on the selected tab without requiring exclusive control", async () => {
   vi.useFakeTimers();
   let controller: string | null = null;
   let commands: any[] = [];
@@ -29,9 +29,6 @@ it("opens DevTools on the selected tab and requires human control", async () => 
   expect(() => service.openDevTools("workspace")).toThrow("not ready");
   service.attach("workspace", {}, "about:blank", () => {});
   await vi.advanceTimersByTimeAsync(0);
-  expect(() => service.openDevTools("workspace")).toThrow("Take control");
-  controller = service.clientId;
-  await vi.advanceTimersByTimeAsync(150);
   service.openDevTools("workspace");
   expect(guests[0].openDevTools).toHaveBeenCalledTimes(1);
   commands = [{ id: "create", operation: "tabs.create", input: {} }];
@@ -41,7 +38,9 @@ it("opens DevTools on the selected tab and requires human control", async () => 
   expect(guests[0].openDevTools).toHaveBeenCalledTimes(1);
   controller = "other-agent";
   await vi.advanceTimersByTimeAsync(150);
-  expect(() => service.openDevTools("workspace")).toThrow("Take control");
+  service.openDevTools("workspace");
+  expect(guests[1].openDevTools).toHaveBeenCalledTimes(2);
+  expect(guests[0].openDevTools).toHaveBeenCalledTimes(1);
   service.dispose();
   expect(() => service.openDevTools("workspace")).toThrow("not ready");
 });

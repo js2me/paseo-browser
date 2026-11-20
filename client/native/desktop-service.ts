@@ -59,8 +59,6 @@ export class NativeDesktopService {
   openDevTools(workspaceId: string) {
     const desktop = this.workspaces.get(workspaceId);
     if (!desktop || desktop.stopped) throw Error("Native browser is not ready");
-    if (desktop.snapshot.controller !== this.clientId)
-      throw Error("Take control of the browser before opening DevTools");
     desktop.guest.openDevTools();
   }
   private createGuest(

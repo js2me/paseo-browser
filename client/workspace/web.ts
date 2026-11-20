@@ -1,3 +1,4 @@
+import { normalizeBrowserUrl } from "../../shared/workspace/browser-url";
 import { agentCursorExpression } from "../../shared/native/agent-cursor";
 import { isBrowserAction, runBrowserAction } from "../../shared/browser-actions";
 /**
@@ -720,10 +721,8 @@ export function mountNativeGuest(
       const input = command.input;
       if (command.operation === "tabs.list") return { tabs: [state()] };
       if (command.operation === "open" || command.operation === "navigate") {
-        const url = new URL(String(input.url));
-        if (!["http:", "https:"].includes(url.protocol))
-          throw Error("Only HTTP(S) URLs are supported");
-        await guest.loadURL(url.href);
+        const url = normalizeBrowserUrl(String(input.url));
+        await guest.loadURL(url);
         return state();
       }
       if (command.operation === "back") {
