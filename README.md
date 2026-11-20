@@ -17,62 +17,46 @@ The catalog installs its reviewed commit. Direct Git installation with
 `paseo plugin add git:js2me/paseo-browser` follows the repository separately.
 
 **Native rendering, desktop DevTools and mobile viewing work with standard Paseo Desktop.**
-Mobile viewing uses its built-in screenshot API when the optional bridge is absent.
-The included bridge adds faster capture and full CDP, including HttpOnly cookie management.
-See [bridge setup](#desktop-bridge-setup).
+Mobile viewing uses its built-in screenshot API on older Desktop builds.
+The built-in Desktop DevTools API adds faster capture and full CDP, including HttpOnly cookie management.
+See [Desktop support](#desktop-devtools-support).
 
 ## Native desktop and mobile
 
 The default `hybrid` mode embeds an actual Electron WebView in the workspace panel. Desktop rendering, keyboard, mouse and scrolling run in Chromium. Mobile and browser clients receive MJPEG frames from that exact guest through authenticated Paseo plugin RPCs. The desktop remains the browser host; websites and `localhost` URLs run on that desktop.
 
-The mobile viewer retains its last decoded frame while the next JPEG loads, with Android image fading disabled. Remote capture starts only when a viewer is watching. It publishes the latest frame with no playback backlog and bounds frames to 1280 × 960 at JPEG quality 65. Standard desktop capture is limited to five requests per second, with one capture in flight. With the optional bridge, capture requests approximately 15 updates per second, with a bounded CDP still fallback for static pages. Closing the desktop panel parks its native guests without destroying them, so mobile viewing can continue. The desktop application must remain connected. Requests from an agent or mobile viewer start the native browser even when that workspace panel has never been opened on desktop. iOS and Android use their native image component for the JPEG stream. Desktop always displays the actual WebView in hybrid mode, including when the bridge is absent.
+The mobile viewer retains its last decoded frame while the next JPEG loads, with Android image fading disabled. Remote capture starts only when a viewer is watching. It publishes the latest frame with no playback backlog and bounds frames to 1280 × 960 at JPEG quality 65. Standard desktop capture is limited to five requests per second, with one capture in flight. With the built-in Desktop DevTools API, capture requests approximately 15 updates per second, with a bounded CDP still fallback for static pages. Closing the desktop panel parks its native guests without destroying them, so mobile viewing can continue. The desktop application must remain connected. Requests from an agent or mobile viewer start the native browser even when that workspace panel has never been opened on desktop. iOS and Android use their native image component for the JPEG stream. Desktop always displays the actual WebView in hybrid mode, including when the bridge is absent.
 
-Each workspace supports eight native tabs. Take and release control to pass the browser between a person and agents. Native agent tools wait for an in-flight command before a human takeover and reject commands whose lease changed. Dispatched mutations are never automatically retried. Mobile taps target the desktop viewport; the text controls send input to the focused page field.
+Keeping the daemon running after closing Desktop does not keep the browser window alive. When an agent explicitly opens a site and no browser host responds, a packaged Linux daemon with a graphical display can reopen its own installed Paseo Desktop. It first waits for the normal connection, limits launch attempts to one per 30 seconds and never restarts the daemon. Status checks, viewer polls and already dispatched actions do not launch Desktop. Headless hosts, plain Node daemons and other operating systems still require an available Desktop window. A command paused by request interception or a debugger is reported separately from a disconnected browser.
 
-On desktop, take control and click **DevTools** to open Chromium's developer tools for the selected tab in a separate window, including Elements, Console, Network, Sources and Application.
+Each workspace supports eight native tabs. People and agents work in the same browser without taking or releasing control. Agent and mobile commands run in order, while desktop input stays available. Dispatched mutations are never automatically retried. Mobile taps target the desktop viewport; the text controls send input to the focused page field.
+
+After one minute without an attached panel, remote viewers, a controller or browser commands, the workspace's native WebViews are destroyed to free Chromium memory. Reopening the panel or receiving a remote browser request restores its tab URLs and selected tab. Cookies and logins remain in the shared profile; navigation history, unsaved forms and other in-page state are lost. URL snapshots are kept in memory for up to 128 inactive workspaces and cleared when the plugin stops.
+
+On desktop, click **DevTools** to open Chromium's developer tools for the selected tab in a separate window, including Elements, Console, Network, Sources and Application.
 
 Native tabs use `persist:paseo-browser`, the same profile as Paseo's built-in browser. Cookies and logins are shared across native workspace tabs. This is independent of the legacy daemon Chrome profiles.
 
-## Desktop bridge setup
+## Desktop DevTools support
 
-Paseo's existing desktop WebView APIs support native rendering, DevTools, mobile capture and mobile taps/text/keys. The optional bridge included in `integrations/paseo/` adds higher-rate capture, full guest CDP and cookie management including HttpOnly cookies. Without it, mobile viewing uses the desktop's built-in screenshot API and remote input targets the same native guest. No independent Chrome session is opened and the desktop does not display a video stream.
+Full native DevTools access is integrated into Paseo Desktop through its browser API (`nativeBridgeVersion: 1`, `sendNativeCommand`, `readNativeEvents`, `captureNativeFrame`). The plugin detects it automatically. Users install the plugin and use a Desktop release containing this API; no application copying, ASAR patching or additional browser is required.
 
-On Linux, prepare a separate copy of your existing desktop AppDir:
+The integration is prepared in the Paseo source checkout and must ship in a Desktop release before this is available to all users. The plugin cannot add Electron main-process APIs to an older running Desktop. Older builds continue to support navigation, snapshots, screenshots, JavaScript and HTML/computed-style inspection. CDP-only operations report that Desktop needs an update.
 
-```sh
-npm run prepare:native-desktop -- --source /path/to/Paseo-AppDir --destination /new/path/paseo-native
-```
-
-This copies the application, updates its ASAR browser bridge, preserves native dependencies and leaves the running app and daemon untouched. The destination must not already exist. Close the original desktop before launching `/new/path/paseo-native/run-native-paseo`. The generated Linux launcher defaults to X11/XWayland when `DISPLAY` is available, because hidden WebViews can stall capture on Wayland in Electron 37. GPU acceleration remains enabled. Use `PASEO_ELECTRON_FLAGS` to explicitly select a different backend, and use the normal sandbox flags for your installation. Do not restart a desktop-managed daemon while agents are running without arranging that interruption.
-
-For a source build, apply `integrations/paseo/native-bridge.patch` to the documented Paseo revision and build its desktop package. See [bridge details](integrations/paseo/README.md).
-
-Open **Open Workspace Browser** in the Command Center or press the browser composer/header button. The panel opens only through these explicit actions or a browser-session sidebar entry. Agents can work with the browser in the background while you stay in chat. The phone shows the native desktop's broadcast. A workspace whose desktop browser is not available reports that condition instead of opening an independent Chrome.
-
-<details>
-<summary>Mobile view of the same desktop session</summary>
-
-![Same-session mobile broadcast in a compact web client](assets/native-mobile.png)
-
-</details>
-
-Screenshots use sample data in an isolated Electron integration host and a phone-sized web client.
-Linux native behavior has been tested; physical iOS/Android devices and macOS/Windows native builds
-have not been verified. The source patch baseline is Paseo 0.15.3 at the revision in
-[`integrations/paseo/base.json`](integrations/paseo/base.json); the Linux AppDir overlay was also
-verified against Paseo 0.15.0. Other desktop revisions may require adapting the patch.
+The files under `integrations/paseo/` are developer integration artifacts, not end-user setup instructions.
 
 ## Agent tools
 
 Native mode injects the `paseo-browser` MCP adapter:
 
-- `native_browser_open`, `shared_browser_status`, control acquire/release, navigation and native tab tools.
+- `native_browser_open`, `shared_browser_status`, navigation and native tab tools.
+- `native_browser_cursor` moves the visible Agent pointer or clicks at viewport CSS coordinates. Pass `browserId` and `generation` from current status, `x`, `y`, and `action: "move" | "click"`. Native pointer automation also displays the pointer, including in mobile broadcasts.
 - `native_browser_automation` for snapshots, click/fill/type, keyboard, wait, screenshot, upload/select, hover/drag, console/network logs, scrolling and resizing.
 - `evaluate_script` for page JavaScript.
 - `browser_cookies` for import/export, setting, deletion and clearing, including HttpOnly/Secure attributes.
 - `cdp_send` and `cdp_events` for guest CDP domains and bounded protocol events.
 
-Acquire control before actions and release afterward. `native_browser_automation` takes `{ name, args }`; use element refs from its current `snapshot`. Native browser IDs come from `shared_browser_tabs`. Browser-level commands cannot close or crash Paseo; manage native tabs through the dedicated tab tools. Cookie and protocol rules are enforced by Chromium. Native CDP is scoped to the registered guest and its owning window/workspace. Uploads use the desktop's filesystem and Paseo's workspace path checks.
+Control is shared automatically. Older acquire/release tool calls remain compatible and do not lock out other participants. `native_browser_automation` takes `{ name, args }`; use element refs from its current `snapshot`. Native browser IDs come from `shared_browser_tabs`. Browser-level commands cannot close or crash Paseo; manage native tabs through the dedicated tab tools. Cookie and protocol rules are enforced by Chromium. Native CDP is scoped to the registered guest and its owning window/workspace. Uploads use the desktop's filesystem and Paseo's workspace path checks.
 
 Installation writes runtime adapters under `$PASEO_HOME/plugin-data/paseo-browser/`. The managed skill under `agent-skills/paseo-browser` is installed into the local agent skill directories. Existing agent sessions need reloading to discover the native adapter. The skill is scoped to live page interaction, not code-only work or plugin configuration. Browser tools remain available without modifying agent system prompts. Existing chats can retain instructions loaded before this update. Unrelated MCP servers and user prompts are preserved.
 
@@ -136,7 +120,7 @@ npm run test:ui
 PASEO_ELECTRON_BINARY=/path/to/electron npm run test:native
 ```
 
-The native integration test uses a separate Electron process and profile, real WebViews and CDP, a real MCP adapter, and a phone-sized Chrome client. It checks native snapshots/screenshots/tabs, HttpOnly cookies, mobile touch, lease fencing, and fresh frames while the desktop pane is parked. Set `PASEO_CHECKOUT` to the Paseo source checkout containing the bridge patch; it defaults to `../paseo`. This validates a compact web client, not physical iOS/Android hardware.
+The native integration test uses a separate Electron process and profile, real WebViews and CDP, a real MCP adapter, and a phone-sized Chrome client. It checks native snapshots/screenshots/tabs, HttpOnly cookies, mobile touch, shared agent input, the visible agent cursor, and fresh frames while the desktop pane is parked. Set `PASEO_CHECKOUT` to the Paseo source checkout containing the bridge patch; it defaults to `../paseo`. This validates a compact web client, not physical iOS/Android hardware.
 
 `test:shared` and `test:ui` cover the retained legacy browser mode. Generated runtimes, local machine paths, node_modules and test artifacts are excluded from the
 package or Git. The listing screenshots in `assets/` are intentionally shipped.
@@ -160,3 +144,7 @@ personal page content from logs and screenshots.
 
 Licensed under [MIT](LICENSE). Shared Browser attribution is in
 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md); the desktop integration retains Paseo's licenses.
+
+Agents can also use `browser_storage` for local and session storage, `browser_dialog` to answer JavaScript dialogs, `browser_emulate` for device metrics, timezone, location and media preferences, and `browser_network` for offline mode, throttling, headers, cache and URL blocking. Workspace mode requires a page CDP target ID; native mode uses the selected tab and requires the built-in Desktop DevTools API for dialog, emulation and network operations. These tools use the same authenticated, ordered command path.
+
+`browser_inspect` reads element HTML, attributes, computed CSS and geometry by CSS selector, including pseudo-element styles, without the native desktop bridge. `browser_dom` exposes the DevTools document tree, queries, box model and live DOM editing. `browser_css` reads matched/inherited rules, computed and inline styles, stylesheet sources and supports live CSS edits and forced hover/focus states. The latter two require the Desktop DevTools API in native mode. General CDP commands and events remain available for Network, Debugger, Performance, Profiler and Accessibility. Live edits do not change source files.

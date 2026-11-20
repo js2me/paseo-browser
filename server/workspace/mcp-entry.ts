@@ -166,7 +166,7 @@ async function main(): Promise<void> {
     "shared_browser_tab_close",
     {
       description:
-        "Close this agent's selected and controlled tab for every viewer. Other tabs remain open.",
+        "Close this agent's selected tab for every viewer. Other tabs remain open.",
       inputSchema: z.object({}),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
     },
@@ -177,7 +177,7 @@ async function main(): Promise<void> {
     "shared_browser_acquire_control",
     {
       description:
-        "Acquire browser control if no human or other viewer currently holds it. Forced takeover is unavailable.",
+        "Compatibility call: establish this agent's shared input capability. Actions acquire it automatically.",
       inputSchema: z.object({}),
       annotations: {
         readOnlyHint: false,
@@ -191,7 +191,7 @@ async function main(): Promise<void> {
   server.registerTool(
     "shared_browser_release_control",
     {
-      description: "Release this agent's browser control lease.",
+      description: "Compatibility call: release only this agent's input capability. Other participants keep working.",
       inputSchema: z.object({}),
       annotations: {
         readOnlyHint: false,

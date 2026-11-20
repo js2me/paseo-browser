@@ -3,6 +3,7 @@ import {
   nativeControlRpc,
   nativeExchangeRpc,
   nativePresenceRpc,
+  nativeReleaseRpc,
   type NativeState,
   type NativeCommand,
   type NativeFrame,
@@ -24,10 +25,14 @@ type Desktop = {
   timer: ReturnType<typeof setTimeout> | null;
   stopped: boolean;
 };
-/** A permanent native guest per tab; React panels only present or park its surface. */
+const IDLE_WORKSPACE_MS = 60_000;
+const MAX_SAVED_WORKSPACES = 128;
+type SavedWorkspace = { tabs: Array<{ id: string; url: string }>; selected: string };
+/** Park briefly between panels, then release idle Chromium guests and retain only URLs. */
 export class NativeDesktopService {
   readonly clientId = `desktop-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   private workspaces = new Map<string, Desktop>();
+  private savedWorkspaces = new Map<string, SavedWorkspace>();
   private stopped = false;
   private presenceTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -54,8 +59,6 @@ export class NativeDesktopService {
   openDevTools(workspaceId: string) {
     const desktop = this.workspaces.get(workspaceId);
     if (!desktop || desktop.stopped) throw Error("Native browser is not ready");
-    if (desktop.snapshot.controller !== this.clientId)
-      throw Error("Take control of the browser before opening DevTools");
     desktop.guest.openDevTools();
   }
   private createGuest(
@@ -63,8 +66,8 @@ export class NativeDesktopService {
     node: unknown,
     url: string,
     onError: (message: string) => void,
+    id = createNativeBrowserId(),
   ) {
-    const id = createNativeBrowserId();
     const guest = mountNativeGuest(node, workspaceId, id, onError, url);
     if (!guest) throw Error("Native Chromium requires the Paseo desktop application");
     return { id, guest };
@@ -127,13 +130,29 @@ export class NativeDesktopService {
       const publish = () => {
         for (const listener of listeners) listener({ ...snapshot });
       };
-      const created = this.createGuest(workspaceId, node, initialUrl, (error) => {
+      const onError = (error: string) => {
         snapshot.error = error;
         publish();
-      });
+      };
+      const saved = this.savedWorkspaces.get(workspaceId);
+      const restored = new Map<string, NativeGuestController>();
+      try {
+        for (const tab of saved?.tabs ?? []) {
+          const created = this.createGuest(workspaceId, null, tab.url, onError, tab.id);
+          restored.set(created.id, created.guest);
+        }
+        if (!restored.size) {
+          const created = this.createGuest(workspaceId, node, initialUrl, onError);
+          restored.set(created.id, created.guest);
+        }
+      } catch (error) {
+        for (const guest of restored.values()) guest.dispose();
+        throw error;
+      }
+      this.savedWorkspaces.delete(workspaceId);
       desktop = {
-        guest: created.guest,
-        guests: new Map([[created.id, created.guest]]),
+        guest: (saved && restored.get(saved.selected)) || restored.values().next().value!,
+        guests: restored,
         anchor: node,
         listeners,
         snapshot,
@@ -148,10 +167,13 @@ export class NativeDesktopService {
       let captureTask: Promise<void> | null = null;
       let capturedFrame: NativeFrame | null = null;
       let captureError: string | null = null;
+      let lastActiveAt = Date.now();
+      let executing = 0;
       const pump = async () => {
+        if (owned.stopped) return;
         try {
           const guest = owned.guest;
-          guest.inputEnabled(snapshot.controller === this.clientId);
+          guest.inputEnabled(true);
           snapshot.state = guest.state();
           if (snapshot.state)
             snapshot.state.tabs = [...owned.guests].map(([browserId, tab]) => ({
@@ -178,6 +200,7 @@ export class NativeDesktopService {
             results = [...completed, ...results];
             throw error;
           }
+          if (owned.stopped) return;
           if (!reply.accepted) {
             snapshot.error = "This native browser is hosted by another desktop.";
             publish();
@@ -189,12 +212,40 @@ export class NativeDesktopService {
           snapshot.controller = reply.controller;
           snapshot.error = captureError;
           streaming = reply.streaming;
+          if (owned.listeners.size || streaming || reply.controller || reply.commands.length ||
+            completed.length || executing) lastActiveAt = Date.now();
+          if (!owned.listeners.size && !streaming && !reply.controller &&
+            !reply.commands.length && !completed.length && !executing &&
+            Date.now() - lastActiveAt >= IDLE_WORKSPACE_MS) {
+            const { released } = await this.client.rpc(nativeReleaseRpc, {
+              workspaceId, clientId: this.clientId,
+            });
+            if (owned.stopped) return;
+            if (released && !owned.listeners.size) {
+              const tabs = [...owned.guests].map(([id, guest]) => ({
+                id, url: guest.state()?.url ?? "about:blank",
+              }));
+              const selected = [...owned.guests].find(([, guest]) => guest === owned.guest)![0];
+              if (this.savedWorkspaces.size >= MAX_SAVED_WORKSPACES)
+                this.savedWorkspaces.delete(this.savedWorkspaces.keys().next().value!);
+              this.savedWorkspaces.set(workspaceId, { tabs, selected });
+              owned.stopped = true;
+              capturedFrame = null;
+              for (const guest of owned.guests.values()) guest.dispose();
+              owned.guests.clear();
+              owned.anchor = null;
+              this.workspaces.delete(workspaceId);
+              return;
+            }
+          }
           publish();
-          for (const command of reply.commands)
+          for (const command of reply.commands) {
+            executing++;
             void this.execute(workspaceId, owned, command).then(
-              (result) => results.push({ id: command.id, result }),
-              (error) => results.push({ id: command.id, error: String(error) }),
-            );
+              (result) => { if (!owned.stopped) results.push({ id: command.id, result }); },
+              (error) => { if (!owned.stopped) results.push({ id: command.id, error: String(error) }); },
+            ).finally(() => { executing--; });
+          }
           // A capture can wait for a compositor paint (including on about:blank).
           // It must never hold command dispatch or the desktop ownership heartbeat.
           if (streaming && snapshot.state && !captureTask) {
@@ -230,6 +281,7 @@ export class NativeDesktopService {
     return () => {
       owned.listeners.delete(listener);
       if (owned.listeners.size) return;
+      owned.anchor = null;
       owned.guest.present(null);
       if (owned.snapshot.controller === this.clientId)
         void this.client
@@ -247,5 +299,6 @@ export class NativeDesktopService {
       desktop.listeners.clear();
     }
     this.workspaces.clear();
+    this.savedWorkspaces.clear();
   }
 }

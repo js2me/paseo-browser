@@ -458,8 +458,6 @@ export class RuntimeSupervisor<Runtime extends RuntimeInstance = RuntimeInstance
           requireText(data, "viewerToken"),
           data.takeover === true,
         );
-        const state = stateFromPolicyResult(result);
-        if (data.takeover === true) this.revokeAgentControl(state.workspaceId, state.tabId);
         break;
       }
       case "release-control":
@@ -669,6 +667,19 @@ export class RuntimeSupervisor<Runtime extends RuntimeInstance = RuntimeInstance
         tabId: created.tabId,
         state: await this.selectAgentTab(binding, created.tabId),
       } as unknown as JsonValue;
+    }
+    // Each participant has its own capability; acquire silently without stealing control.
+    if (operation !== "acquire-control" && operation !== "release-control") {
+      const revision = binding.selectionRevision;
+      const viewer = await this.ensureAgentViewer(binding);
+      const acquired = await this.browserPolicy.acquireControl(viewer);
+      this.assertAgentBindingCurrent(binding);
+      if (binding.selectionRevision !== revision || binding.viewerToken !== viewer) {
+        await this.agentRequestContext.exit(() => this.browserPolicy.releaseControl(viewer, acquired.controlToken)).catch(() => undefined);
+        throw new RuntimeProtocolError("INVALID_REQUEST", "Agent tab changed during input admission");
+      }
+      binding.controlToken = acquired.controlToken;
+      binding.lastState ??= acquired.state;
     }
     if (operation === "tabs.close") {
       const viewerToken = binding.viewerToken;

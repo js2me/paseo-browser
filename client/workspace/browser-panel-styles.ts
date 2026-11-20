@@ -133,8 +133,8 @@ export function createStyles(theme: Theme, compact: boolean) {
       textAlignVertical: "center",
     },
     chromeIconButton: {
-      width: 28,
-      height: 28,
+      width: compact ? 36 : 30,
+      height: compact ? 40 : 30,
       borderRadius: RADIUS.md,
       alignItems: "center",
       justifyContent: "center",

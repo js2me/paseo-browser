@@ -1,3 +1,5 @@
+import { normalizeBrowserUrl } from "../../shared/workspace/browser-url";
+export { normalizeBrowserUrl } from "../../shared/workspace/browser-url";
 import { randomBytes } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
@@ -133,6 +135,8 @@ interface BrowserSession {
   defaultUserAgent: string;
   viewers: Map<string, Viewer>;
   controller: Controller | null;
+  controllers: Map<string, Controller>;
+  agentCursor: BrowserState["agentCursor"];
   mutationTail: Promise<void>;
   frameCache: Map<
     CaptureQuality,
@@ -200,22 +204,6 @@ function asRecord(value: JsonValue): Record<string, JsonValue> {
   return value;
 }
 
-export function normalizeBrowserUrl(input: string): string {
-  const value = input.trim();
-  if (value === "about:blank") return value;
-  const hasScheme = /^[A-Za-z][A-Za-z\d+.-]*:/.test(value);
-  const looksLikeHostWithPort = /^[^/?#:\s]+:\d+(?:[/?#]|$)/.test(value);
-  const candidate = hasScheme && !looksLikeHostWithPort ? value : `https://${value}`;
-  let parsed: URL;
-  try {
-    parsed = new URL(candidate);
-  } catch {
-    throw new Error("Enter a valid HTTP or HTTPS URL");
-  }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
-    throw new Error("Only HTTP, HTTPS, and about:blank URLs are supported");
-  return parsed.href;
-}
 
 export class SessionManager {
   private readonly validateWorkspace: WorkspaceValidator;
@@ -319,6 +307,7 @@ export class SessionManager {
       for (const token of candidate.viewers.keys()) this.viewerSessions.delete(token);
       candidate.viewers.clear();
       candidate.controller = null;
+      candidate.controllers.clear();
       this.sessions.delete(candidate.key);
     }
     return this.getOrCreateSession(lost.workspaceId, undefined, true);
@@ -355,10 +344,9 @@ export class SessionManager {
       this.pruneExpired(session);
       const detached = session.viewers.delete(viewerToken);
       this.viewerSessions.delete(viewerToken);
-      if (session.controller?.viewerToken === viewerToken) {
-        await this.cancelGesture(session);
-        session.controller = null;
-      }
+      if (session.gesture?.viewerToken === viewerToken) await this.cancelGesture(session);
+      session.controllers.delete(viewerToken);
+      session.controller = session.controllers.values().next().value ?? null;
       if (session.viewers.size === 0) {
         await this.request(session, "screencast.stop", null).catch(() => undefined);
         await this.stopUnusedVideo(session);
@@ -445,6 +433,7 @@ export class SessionManager {
     const session = this.requireViewer(input.viewerToken);
     return this.serialize(session, async () => {
       this.requireController(session, input.viewerToken, input.controlToken);
+      this.requireIdlePeerGesture(session, input.viewerToken);
       if (session.tabId !== input.tabId) throw new Error("Browser tab selection is stale");
       await this.cancelGesture(session);
       await this.request(session, "tabs.close", { targetId: input.tabId });
@@ -459,6 +448,7 @@ export class SessionManager {
       }
       session.viewers.clear();
       session.controller = null;
+      session.controllers.clear();
       this.sessions.delete(session.key);
       return { closed: true };
     });
@@ -469,6 +459,7 @@ export class SessionManager {
     const session = this.requireViewer(input.viewerToken);
     const closing = this.serialize(session, async () => {
       this.requireController(session, input.viewerToken, input.controlToken);
+      this.requireIdlePeerGesture(session, input.viewerToken);
       if (session.sessionId !== input.sessionId || session.runtimeId !== input.runtimeId)
         throw new Error("Browser session is stale");
 
@@ -486,6 +477,7 @@ export class SessionManager {
         }
         candidate.viewers.clear();
         candidate.controller = null;
+        candidate.controllers.clear();
       }
       try {
         await this.client.closeWorkspace(session.workspaceId, session.runtimeId);
@@ -538,6 +530,7 @@ export class SessionManager {
       for (const token of session.viewers.keys()) this.viewerSessions.delete(token);
       session.viewers.clear();
       session.controller = null;
+      session.controllers.clear();
       this.sessions.delete(session.key);
     }
   }
@@ -779,22 +772,15 @@ export class SessionManager {
 
   async acquireControl(
     viewerToken: string,
-    takeover = false,
+    _takeover = false,
   ): Promise<{ controlToken: string; state: BrowserState }> {
     const session = this.requireViewer(viewerToken);
     return this.serialize(session, async () => {
       this.heartbeat(session, viewerToken);
-      const current = session.controller;
-      if (current && current.viewerToken !== viewerToken && !takeover)
-        throw new Error("Browser control is held by another viewer");
-      if (current?.viewerToken !== viewerToken) {
-        await this.cancelGesture(session);
-      }
-      const controller =
-        current?.viewerToken === viewerToken
-          ? current
-          : { viewerToken, controlToken: this.issueUniqueToken(), expiresAt: 0 };
+      const current = session.controllers.get(viewerToken);
+      const controller = current ?? { viewerToken, controlToken: this.issueUniqueToken(), expiresAt: 0 };
       controller.expiresAt = this.now() + this.controlLeaseMs;
+      session.controllers.set(viewerToken, controller);
       session.controller = controller;
       return {
         controlToken: controller.controlToken,
@@ -810,8 +796,9 @@ export class SessionManager {
     const session = this.requireViewer(viewerToken);
     return this.serialize(session, async () => {
       this.requireController(session, viewerToken, controlToken);
-      await this.cancelGesture(session);
-      session.controller = null;
+      if (session.gesture?.viewerToken === viewerToken) await this.cancelGesture(session);
+      session.controllers.delete(viewerToken);
+      session.controller = session.controllers.values().next().value ?? null;
       this.heartbeatViewer(session, viewerToken);
       return { state: await this.snapshotState(session, viewerToken) };
     });
@@ -936,6 +923,15 @@ export class SessionManager {
       try {
         await this.cancelGesture(session);
         await this.dispatchDiscreteInput(session, input.event, assertTargetCurrent);
+        const event = input.event;
+        const point = event.kind === "drag" ? event.end : "point" in event ? event.point : null;
+        if (point) session.agentCursor = {
+          ...mapDisplayedPoint(point, session.viewport),
+          label: session.viewers.get(input.viewerToken)?.label ?? "Agent",
+          updatedAt: new Date(this.now()).toISOString(),
+          navigationGeneration: session.navigationGeneration,
+          viewportGeneration: session.viewportGeneration,
+        };
       } finally {
         const hadVideo = session.videoReceipts.size > 0 || session.videoReads.size > 0;
         // Revoke authority even if auxiliary capture fails. Source-age fencing
@@ -1405,6 +1401,8 @@ export class SessionManager {
         defaultUserAgent: userAgent,
         viewers: new Map(),
         controller: null,
+        controllers: new Map(),
+        agentCursor: null,
         mutationTail: Promise.resolve(),
         frameCache: new Map(),
         recentFrames: new Map(),
@@ -1514,8 +1512,8 @@ export class SessionManager {
   private heartbeat(session: BrowserSession, token: string): void {
     this.pruneExpired(session);
     this.heartbeatViewer(session, token);
-    if (session.controller?.viewerToken === token)
-      session.controller.expiresAt = this.now() + this.controlLeaseMs;
+    const controller = session.controllers.get(token);
+    if (controller) controller.expiresAt = this.now() + this.controlLeaseMs;
   }
   private heartbeatViewer(session: BrowserSession, token: string): void {
     const viewer = session.viewers.get(token);
@@ -1529,24 +1527,33 @@ export class SessionManager {
         session.viewers.delete(token);
         this.viewerSessions.delete(token);
       }
-    if (
-      session.controller &&
-      (session.controller.expiresAt <= now || !session.viewers.has(session.controller.viewerToken))
-    ) {
-      session.controller = null;
-      void this.serialize(session, () => this.cancelGesture(session)).catch(() => undefined);
+    for (const [token, controller] of session.controllers) {
+      if (controller.expiresAt <= now || !session.viewers.has(token)) {
+        session.controllers.delete(token);
+        const expiredGesture = session.gesture;
+        if (expiredGesture?.viewerToken === token)
+          void this.serialize(session, () => this.cancelGesture(session, expiredGesture)).catch(() => undefined);
+      }
     }
+    session.controller = session.controllers.values().next().value ?? null;
   }
+
   private requireController(
     session: BrowserSession,
     viewerToken: string,
     controlToken: string,
   ): Controller {
     this.pruneExpired(session);
-    const value = session.controller;
+    const value = session.controllers.get(viewerToken);
     if (!value || value.viewerToken !== viewerToken || value.controlToken !== controlToken)
       throw new Error("Browser control lease is invalid or expired");
     return value;
+  }
+  private requireIdlePeerGesture(session: BrowserSession, viewerToken: string): void {
+    const gesture = session.gesture;
+    if (gesture && gesture.viewerToken !== viewerToken &&
+        (gesture.buttons.size || gesture.touches.size || gesture.keys.size))
+      throw new Error("Another participant is holding input. Wait until their gesture finishes.");
   }
   private requireMutationAccess(
     session: BrowserSession,
@@ -1563,6 +1570,7 @@ export class SessionManager {
     },
   ): void {
     this.requireController(session, input.viewerToken, input.controlToken);
+    this.requireIdlePeerGesture(session, input.viewerToken);
     if (input.expected.sessionId !== session.sessionId) throw new Error("Browser session is stale");
     if (input.expected.navigationGeneration !== session.navigationGeneration)
       throw new Error("Browser navigation state is stale");
@@ -1610,9 +1618,8 @@ export class SessionManager {
   }
   private renewController(session: BrowserSession, token: string): void {
     this.heartbeatViewer(session, token);
-    const controller = session.controller;
-    if (!controller || controller.viewerToken !== token)
-      throw new Error("Browser control lease is invalid or expired");
+    const controller = session.controllers.get(token);
+    if (!controller) throw new Error("Browser control lease is invalid or expired");
     controller.expiresAt = this.now() + this.controlLeaseMs;
   }
   private assertOpen(): void {
@@ -1628,7 +1635,7 @@ export class SessionManager {
         ![...this.sessions.values()].some(
           (session) =>
             session.sessionId === token ||
-            session.controller?.controlToken === token ||
+            [...session.controllers.values()].some((controller) => controller.controlToken === token) ||
             session.recentFrames.has(token),
         )
       )
@@ -1649,7 +1656,7 @@ export class SessionManager {
   }
   private serialize<T>(session: BrowserSession, operation: () => Promise<T>): Promise<T> {
     // DevTools can create or mutate multiple pages. All policy operations for a workspace
-    // share one queue, including human control acquisition, so no tool bypasses a human lease.
+    // share one queue, including human control acquisition, so shared input never interleaves within an operation.
     const previous = this.workspaceTails.get(session.workspaceId) ?? Promise.resolve();
     const result = previous.then(operation, operation);
     const tail = result.then(() => undefined, () => undefined);
@@ -1666,8 +1673,7 @@ export class SessionManager {
       for (const peer of this.sessions.values()) {
         if (peer.workspaceId !== session.workspaceId) continue;
         this.pruneExpired(peer);
-        if (peer.controller && peer.controller.viewerToken !== viewerToken)
-          throw new Error('DevTools requires exclusive workspace control. Another viewer controls a tab.');
+        this.requireIdlePeerGesture(peer, viewerToken);
         await this.cancelGesture(peer);
       }
       this.renewController(session, viewerToken);
@@ -2000,7 +2006,7 @@ export class SessionManager {
   private projectState(session: BrowserSession, viewerToken: string): BrowserState {
     this.pruneExpired(session);
     if (!session.viewers.has(viewerToken)) throw new Error("Viewer token is invalid or expired");
-    const controller = session.controller;
+    const controller = session.controllers.get(viewerToken) ?? null;
     const controllerViewer = controller ? session.viewers.get(controller.viewerToken) : null;
     return {
       sessionId: session.sessionId,
@@ -2023,6 +2029,11 @@ export class SessionManager {
       controller: !controller ? "none" : controller.viewerToken === viewerToken ? "self" : "other",
       controllerLabel: controllerViewer?.label ?? null,
       controllerExpiresAt: controller ? new Date(controller.expiresAt).toISOString() : null,
+      agentCursor:
+        session.agentCursor?.navigationGeneration === session.navigationGeneration &&
+        session.agentCursor.viewportGeneration === session.viewportGeneration &&
+        this.now() - Date.parse(session.agentCursor.updatedAt) < 8_000
+          ? session.agentCursor : null,
       viewerCount: session.viewers.size,
       error: session.error,
       ...(session.notice ? { notice: session.notice } : {}),

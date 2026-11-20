@@ -3,7 +3,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { advancedTools } from "../workspace/advanced-tools";
+import { advancedTools, advancedToolSchemas } from "../workspace/advanced-tools";
 const schemas = {
   shared_browser_status: z.object({}),
   shared_browser_acquire_control: z.object({}),
@@ -12,6 +12,11 @@ const schemas = {
   shared_browser_tab_open: z.object({ url: z.string().url().optional() }),
   shared_browser_tab_select: z.object({ tabId: z.string() }),
   shared_browser_tab_close: z.object({}),
+  native_browser_cursor: z.object({
+    x: z.number().finite().nonnegative(), y: z.number().finite().nonnegative(),
+    browserId: z.string().min(1), generation: z.number().int().nonnegative(),
+    action: z.enum(["move", "click"]).default("move"),
+  }),
   native_browser_open: z.object({ url: z.string().url() }),
   shared_browser_navigate: z.object({
     action: z.discriminatedUnion("kind", [
@@ -51,7 +56,9 @@ const tools = [
         ? "Open a site in the native desktop WebView shared with the mobile broadcast. Keep Paseo Desktop connected to the host; the browser starts even when its panel is closed."
         : name === "native_browser_automation"
           ? "Execute a Paseo native browser command in the same desktop guest. Use snapshot for element refs; pass command arguments in args."
-          : `Native shared browser: ${name}. Acquire control before actions and release after.`,
+          : name === "native_browser_cursor"
+            ? "Move the visible Agent cursor or click at viewport CSS coordinates. Read browserId and generation from current status first. Shared control is always available."
+            : `Native shared browser: ${name}. Work alongside the user; no control handoff is needed.`,
     inputSchema: z.toJSONSchema(schema, { target: "draft-7", io: "input" }),
   })),
 ];
@@ -73,7 +80,9 @@ server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
     let operation = params.name;
     let value: unknown = input;
     const schema = schemas[params.name as keyof typeof schemas];
-    if (schema) schema.parse(input);
+    if (schema) value = schema.parse(input);
+    if (Object.hasOwn(advancedToolSchemas, params.name))
+      value = advancedToolSchemas[params.name as keyof typeof advancedToolSchemas].parse(input);
     if (params.name === "shared_browser_status") operation = "status";
     if (params.name === "shared_browser_acquire_control") operation = "acquire-control";
     if (params.name === "shared_browser_release_control") operation = "release-control";
@@ -81,6 +90,7 @@ server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
     if (params.name === "shared_browser_tab_open") operation = "tabs.create";
     if (params.name === "shared_browser_tab_select") operation = "tabs.select";
     if (params.name === "shared_browser_tab_close") operation = "tabs.close";
+    if (params.name === "native_browser_cursor") operation = "cursor";
     if (params.name === "native_browser_open") operation = "open";
     if (params.name === "native_browser_automation") operation = "automation";
     if (params.name === "evaluate_script") {

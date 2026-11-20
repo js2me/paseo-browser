@@ -62,6 +62,11 @@ export const nativePresenceRpc = defineRpc({
     requestedWorkspaceIds: z.array(z.string()),
   }),
 });
+export const nativeReleaseRpc = defineRpc({
+  name: "native.release",
+  input: z.object({ clientId: z.string().min(16), workspaceId }),
+  output: z.object({ released: z.boolean() }),
+});
 export const nativeWatchRpc = defineRpc({
   name: "native.watch",
   input: z.object({

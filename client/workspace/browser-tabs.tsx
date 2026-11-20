@@ -6,19 +6,6 @@ import type { BrowserState, BrowserTab } from "../../shared/workspace/browser";
 import { ChromeIconButton } from "./browser-chrome";
 import type { createStyles } from "./browser-panel-styles";
 
-/** Use the live selected-tab state when available, and the tab snapshot otherwise. */
-function controllerSummary(tab: BrowserTab, selectedState: BrowserState | null): string {
-  if (selectedState) {
-    if (selectedState.controller === "self") return "You control";
-    if (selectedState.controller === "other") {
-      return `${selectedState.controllerLabel ?? "Another viewer"} controls`;
-    }
-    return "No controller";
-  }
-  return tab.controllerLabel ? `${tab.controllerLabel} controls` : "No controller";
-}
-
-/** Show compact per-tab presence while keeping control actions on the selected tab only. */
 export function BrowserTabs({
   styles,
   theme,
@@ -61,8 +48,7 @@ export function BrowserTabs({
           const selected = tab.id === selectedId;
           const currentState = selected && selectedState?.tabId === tab.id ? selectedState : null;
           const viewerCount = currentState?.viewerCount ?? tab.viewerCount;
-          const controller = controllerSummary(tab, currentState);
-          const presence = `${viewerCount} viewer${viewerCount === 1 ? "" : "s"} · ${controller}`;
+          const presence = `${viewerCount} viewer${viewerCount === 1 ? "" : "s"} · Shared control`;
           return (
             <View key={tab.id} style={[styles.tabItem, selected ? styles.tabItemSelected : null]}>
               <Pressable

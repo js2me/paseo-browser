@@ -17,25 +17,51 @@ type Workspace = {
   seenAt: number;
   state: NativeState | null;
   frame: NativeFrame | null;
-  frameReceivedAt:number;
+  frameReceivedAt: number;
   pending: Map<string, Pending>;
   viewers: Map<string, number>;
   control: { id: string; human: boolean; until: number } | null;
   error: string | null;
-  takeover: string | null;
 };
 const OWNER_TTL = 5_000;
 const VIEWER_TTL = 2_500;
+const CDP_UNBLOCKERS = new Set([
+  "Debugger.evaluateOnCallFrame",
+  "Debugger.getScriptSource",
+  "Runtime.getProperties",
+  "Page.handleJavaScriptDialog",
+  "Debugger.resume",
+  "Debugger.stepInto",
+  "Debugger.stepOut",
+  "Debugger.stepOver",
+  "Debugger.disable",
+  "Runtime.terminateExecution",
+  "Runtime.runIfWaitingForDebugger",
+  "Fetch.continueRequest",
+  "Fetch.continueResponse",
+  "Fetch.fulfillRequest",
+  "Fetch.failRequest",
+  "Fetch.continueWithAuth",
+  "Fetch.disable",
+]);
+function canUnblock(command: NativeCommand): boolean {
+  return (
+    command.operation === "cdp_events" ||
+    command.operation === "browser_dialog" ||
+    (command.operation === "cdp_send" &&
+      typeof command.input.method === "string" &&
+      CDP_UNBLOCKERS.has(command.input.method))
+  );
+}
 const CONTROL_TTL = 30_000;
 
-/** Workspace-bound command mailbox. Published mutations are never retried. */
 export class NativeRelay {
   private workspaces = new Map<string, Workspace>();
   private tickets = new Map<string, { workspaceId: string; agentId: string; cwd?: string }>();
   private server: Server | null = null;
   private url = "";
   private stopped = false;
-  constructor(private now = Date.now) {}
+  constructor(private now = Date.now, private wakeDesktop?: () => Promise<boolean>) {}
   private workspace(id: string) {
     let workspace = this.workspaces.get(id);
     if (!workspace) {
@@ -44,32 +70,35 @@ export class NativeRelay {
         seenAt: 0,
         state: null,
         frame: null,
-        frameReceivedAt:0,
+        frameReceivedAt: 0,
         pending: new Map(),
         viewers: new Map(),
         control: null,
         error: null,
-        takeover: null,
       };
       this.workspaces.set(id, workspace);
     }
-    if (workspace.control && workspace.control.until <= this.now()) workspace.control = null;
+    if (workspace.control && workspace.control.until <= this.now())
+      workspace.control = null;
     if (workspace.clientId && workspace.seenAt + OWNER_TTL < this.now()) {
       workspace.clientId = null;
       workspace.state = null;
       workspace.frame = null;
       workspace.control = null;
-      workspace.takeover = null;
-      workspace.error = "Desktop browser disconnected. Waiting for a connected desktop to host it again.";
+      workspace.error =
+        "Desktop browser disconnected. Waiting for a connected desktop to host it again.";
       for (const pending of workspace.pending.values()) {
+        // An explicit opening that never reached Desktop can still start on the
+        // replacement host. Already dispatched mutations must never be replayed.
+        if (!pending.dispatched && pending.command.operation === "open") continue;
         clearTimeout(pending.timer);
+        workspace.pending.delete(pending.command.id);
         pending.reject(
           new Error(
             "Desktop browser disconnected; a dispatched command may have completed. Do not retry mutations automatically.",
           ),
         );
       }
-      workspace.pending.clear();
     }
     return workspace;
   }
@@ -79,10 +108,28 @@ export class NativeRelay {
     for (const id of this.workspaces.keys()) {
       const workspace = this.workspace(id);
       if (workspace.clientId) workspaceIds.push(id);
-      if (workspace.pending.size || [...workspace.viewers.values()].some(until => until > this.now()))
+      if (
+        workspace.pending.size ||
+        [...workspace.viewers.values()].some((until) => until > this.now())
+      )
         requestedWorkspaceIds.push(id);
     }
     return { workspaceIds, requestedWorkspaceIds };
+  }
+  /** Release only an idle owner, atomically with command/viewer admission. */
+  release(workspaceId: string, clientId: string) {
+    const workspace = this.workspaces.get(workspaceId);
+    if (!workspace || workspace.clientId !== clientId) return { released: false };
+    this.workspace(workspaceId);
+    if (workspace.pending.size || workspace.control ||
+      [...workspace.viewers.values()].some((until) => until > this.now()))
+      return { released: false };
+    workspace.clientId = null;
+    workspace.state = null;
+    workspace.frame = null;
+    workspace.viewers.clear();
+    workspace.error = null;
+    return { released: true };
   }
   exchange(input: {
     clientId: string;
@@ -131,32 +178,12 @@ export class NativeRelay {
       else pending.resolve(result.result);
     }
     const commands: NativeCommand[] = [];
-    // One in-flight command preserves native input and CDP ordering.
-    if (
-      input.state &&
-      !workspace.takeover &&
-      ![...workspace.pending.values()].some((p) => p.dispatched)
-    ) {
+    // Keep input ordered, but permit event reads and replies that unblock paused JavaScript.
+    const inFlight = [...workspace.pending.values()].some((p) => p.dispatched);
+    if (input.state) {
       for (const next of workspace.pending.values()) {
-        if (
-          !["tabs.list", "open"].includes(next.command.operation) &&
-          workspace.control?.id !== next.owner
-        ) {
-          clearTimeout(next.timer);
-          workspace.pending.delete(next.command.id);
-          next.reject(Error("Browser control changed before dispatch"));
-          continue;
-        }
-        if (
-          next.command.operation === "open" &&
-          workspace.control &&
-          workspace.control.id !== next.owner
-        ) {
-          clearTimeout(next.timer);
-          workspace.pending.delete(next.command.id);
-          next.reject(Error("Browser control changed before dispatch"));
-          continue;
-        }
+        const unblocker = canUnblock(next.command);
+        if (next.dispatched || (inFlight && !unblocker)) continue;
         next.dispatched = true;
         commands.push(next.command);
         break;
@@ -189,26 +216,14 @@ export class NativeRelay {
     };
   }
   async control(workspaceId: string, id: string, human: boolean, action: "acquire" | "release") {
+    if (this.stopped) throw Error("Native browser relay stopped");
     const workspace = this.workspace(workspaceId);
-    if (action === "release") {
-      if (workspace.control?.id === id) workspace.control = null;
-    } else {
-      if (workspace.takeover && workspace.takeover !== id)
-        throw Error("Browser control transfer is pending");
-      if (workspace.control && workspace.control.id !== id && (!human || workspace.control.human))
-        throw Error("Browser is controlled by another participant");
-      const pending = [...workspace.pending.values()].find((p) => p.dispatched && p.owner !== id);
-      if (pending) {
-        workspace.takeover = id;
-        await pending.settled;
-      }
-      if (workspace.control && workspace.control.id !== id && (!human || workspace.control.human))
-        throw Error("Browser is controlled by another participant");
-      workspace.control = { id, human, until: this.now() + CONTROL_TTL };
-      workspace.takeover = null;
-    }
+    // Compatibility for older tool clients; participation never locks out another viewer.
+    if (action === "acquire") workspace.control = { id, human, until: this.now() + CONTROL_TTL };
+    else if (workspace.control?.id === id) workspace.control = null;
     return { controller: workspace.control?.id ?? null };
   }
+
   async command(
     workspaceId: string,
     id: string,
@@ -217,13 +232,6 @@ export class NativeRelay {
   ) {
     if (this.stopped) throw Error("Native browser relay stopped");
     const workspace = this.workspace(workspaceId);
-    if (operation === "open" && workspace.control && workspace.control.id !== id)
-      throw Error("Browser is controlled by another participant");
-    if (!["status", "tabs.list", "open"].includes(operation) && workspace.control?.id !== id)
-      throw Error(
-        "Acquire native browser control first; another participant may control the browser",
-      );
-    if (workspace.control?.id === id) workspace.control.until = this.now() + CONTROL_TTL;
     if (operation === "status")
       return {
         state: workspace.state,
@@ -233,22 +241,35 @@ export class NativeRelay {
     if (workspace.pending.size >= 32) throw Error("Native browser queue is full");
     return new Promise<unknown>((resolve, reject) => {
       const completion = Promise.withResolvers<void>();
+      let wakeTimer: ReturnType<typeof setTimeout> | null = null;
+      const clearWakeTimer = () => { if (wakeTimer) clearTimeout(wakeTimer); };
       const accept = (value: unknown) => {
+        clearWakeTimer();
         completion.resolve();
         resolve(value);
       };
       const refuse = (error: Error) => {
+        clearWakeTimer();
         completion.resolve();
         reject(error);
       };
       const command = { id: randomUUID(), operation, input };
       const timer = setTimeout(() => {
-        workspace.pending.delete(command.id);
-        refuse(
-          Error(
-            "Native browser command timed out. Keep Paseo Desktop connected to this host so it can start the workspace browser. Dispatched mutations are not retried.",
-          ),
-        );
+        const pending = workspace.pending.get(command.id);
+        if (!pending) return;
+        const browserConnected = workspace.clientId && workspace.seenAt + OWNER_TTL >= this.now();
+        const error = Error(pending.dispatched
+          ? "Native browser execution timed out. This does not mean Desktop disconnected: the page may be paused by a dialog, debugger or request interception. Read events and unblock it; do not retry dispatched mutations automatically."
+          : browserConnected
+            ? "Native browser command timed out in the queue. Desktop is connected; another operation may be waiting for a dialog, debugger or intercepted request."
+            : "Native browser connection timed out. The plugin is running, but no native browser host connected. A Paseo Desktop window must be running and connected to this host. The daemon alone cannot host a native tab.");
+        if (pending.dispatched) {
+          // The caller's timeout does not end execution on Desktop.
+          reject(error);
+        } else {
+          workspace.pending.delete(command.id);
+          refuse(error);
+        }
       }, 15_000);
       workspace.pending.set(command.id, {
         command,
@@ -259,6 +280,29 @@ export class NativeRelay {
         owner: id,
         settled: completion.promise,
       });
+      if (operation === "open" && this.wakeDesktop) {
+        // First give a connected Desktop's normal cold-start poll time to respond.
+        // Status checks, viewer polls and dispatched operations never launch a GUI.
+        const wakeIfNeeded = () => {
+          const pending = workspace.pending.get(command.id);
+          if (this.stopped || !pending || pending.dispatched) return;
+          const hasDesktop = [...this.workspaces.values()].some(
+            (owner) => owner.clientId && owner.seenAt + OWNER_TTL >= this.now(),
+          );
+          if (hasDesktop) {
+            // A closing window's final heartbeat can remain fresh for a few seconds.
+            wakeTimer = setTimeout(wakeIfNeeded, 1_000);
+            return;
+          }
+          void this.wakeDesktop!().catch((error: unknown) => {
+            if (workspace.pending.get(command.id) !== pending || pending.dispatched) return;
+            workspace.pending.delete(command.id);
+            clearTimeout(pending.timer);
+            pending.reject(Error(`Could not reopen the local Paseo Desktop: ${String(error)}`));
+          });
+        };
+        wakeTimer = setTimeout(wakeIfNeeded, 2_000);
+      }
     });
   }
   async listen() {
@@ -285,17 +329,19 @@ export class NativeRelay {
           parsed.operation === "acquire-control"
             ? await this.control(binding.workspaceId, binding.agentId, false, "acquire")
             : parsed.operation === "release-control"
-              ? await this.control(binding.workspaceId, binding.agentId, false, "release")
-              : await this.command(binding.workspaceId, binding.agentId, parsed.operation, {
-                  ...(parsed.input ?? {}),
-                  ...(parsed.operation === "automation" ? { cwd: binding.cwd } : {}),
-                });
+            ? await this.control(binding.workspaceId, binding.agentId, false, "release")
+            : await this.command(binding.workspaceId, binding.agentId, parsed.operation, {
+                ...(parsed.input ?? {}),
+                ...(parsed.operation === "automation" ? { cwd: binding.cwd } : {}),
+              });
         res.setHeader("Content-Type", "application/json");
         res.end(JSON.stringify({ result }));
       } catch (error) {
-        res
-          .writeHead(400, { "Content-Type": "application/json" })
-          .end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+        res.writeHead(400, { "Content-Type": "application/json" }).end(
+          JSON.stringify({
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        );
       }
     });
     await new Promise<void>((resolve) => this.server!.listen(0, "127.0.0.1", resolve));

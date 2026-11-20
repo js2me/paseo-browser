@@ -28,6 +28,7 @@ const output = await build({
   alias: {
     "react-native": "react-native-web",
     "@getpaseo/plugin/client": resolve("tests/ui/host-hooks.jsx"),
+    "@getpaseo/plugin/client/ui": resolve("tests/ui/host-ui.jsx"),
   },
 });
 const errors: string[] = [];
@@ -100,6 +101,7 @@ window.webContents.on('console-message',(...args)=>console.log('RENDERER',...arg
 `;
 await build({
   stdin: { contents: main, resolveDir: process.cwd(), sourcefile: "native-main.ts" },
+  nodePaths: [resolve("node_modules")],
   bundle: true,
   platform: "node",
   format: "esm",
@@ -149,7 +151,17 @@ try {
     return JSON.parse(result.content[0].text);
   };
   await call("native_browser_open", { url: `${url}/fixture` });
-  await call("shared_browser_acquire_control");
+  const cursorState = await call("shared_browser_status");
+  await call("native_browser_cursor", { browserId: cursorState.state.browserId,
+    generation: cursorState.state.generation, x: 40, y: 50, action: "move" });
+  assert.equal(await call("evaluate_script", { function: '() => Boolean(window.__paseoAgentCursor?.isConnected)' }), true);
+  const inspection = await call("browser_inspect", { selector: "h1", properties: ["display", "font-size"] });
+  assert.match(inspection.html, /Real native Chromium/);
+  assert.equal(inspection.computedStyle.display, "block");
+  const { root: domRoot } = await call("browser_dom", { action: { kind: "document" } });
+  const { nodeId: headingNode } = await call("browser_dom", { action: { kind: "query", nodeId: domRoot.nodeId, selector: "h1" } });
+  const styles = await call("browser_css", { action: { kind: "matched", nodeId: headingNode } });
+  assert.ok(Array.isArray(styles.matchedCSSRules));
   await call("browser_cookies", {
     action: "set",
     cookies: [{ name: "native_session", value: "same-profile", url, httpOnly: true }],
@@ -177,6 +189,31 @@ try {
   assert.ok(!screenshot.isError, JSON.stringify(screenshot));
   assert.equal(screenshot.content[0].type, "image");
   await call("cdp_send", { method: "Runtime.enable" });
+  await call("cdp_send", { method: "Page.enable" });
+  const waitForEvent = async (method: string) => {
+    for (let attempt = 0; attempt < 40; attempt++) {
+      const result = await call("cdp_events", { method });
+      if (result.events.length) return result.events[0];
+      await pause(100);
+    }
+    throw Error(`Missing native event ${method}`);
+  };
+  const prompted = call("cdp_send", { method: "Runtime.evaluate", params: { expression: "confirm('Native DevTools confirm')", returnByValue: true } });
+  await waitForEvent("Page.javascriptDialogOpening");
+  await call("browser_dialog", { accept: true, promptText: "native reply" });
+  assert.equal((await prompted).result.value, true);
+  await call("cdp_send", { method: "Debugger.enable" });
+  const paused = call("cdp_send", { method: "Runtime.evaluate", params: { expression: "(() => { const local = 42; debugger; return local; })()", returnByValue: true } });
+  const pausedEvent = await waitForEvent("Debugger.paused");
+  const pausedFrame = pausedEvent.params.callFrames[0];
+  const localValue = await call("cdp_send", { method: "Debugger.evaluateOnCallFrame", params: { callFrameId: pausedFrame.callFrameId, expression: "local", returnByValue: true } });
+  assert.equal(localValue.result.value, 42);
+  const scope = pausedFrame.scopeChain.find((item: any) => item.type === "local");
+  const locals = await call("cdp_send", { method: "Runtime.getProperties", params: { objectId: scope.object.objectId } });
+  assert.ok(locals.result.some((item: any) => item.name === "local" && item.value.value === 42));
+  await call("cdp_send", { method: "Debugger.resume" });
+  assert.equal((await paused).result.value, 42);
+  await call("cdp_send", { method: "Debugger.disable" });
   const scopedCookies=await call("cdp_send",{method:"Storage.getCookies"});assert.ok(scopedCookies.cookies.some((cookie:any)=>cookie.name==='native_session'));
   const outside:any=await mcp.callTool({name:"cdp_send",arguments:{method:"Network.getAllCookies",params:{browserContextId:"other-context"}}});assert.equal(outside.isError,true);
   const targets = await call("cdp_send", { method: "Target.getTargets" });
@@ -192,7 +229,6 @@ try {
     function:
       '() => {const r=document.querySelector("button").getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}}',
   });
-  await call("shared_browser_release_control");
   mobile = await puppeteer.launch({ executablePath: "/usr/bin/google-chrome", headless: true });
   const page = await mobile.newPage();
   await page.setViewport({ width: 390, height: 844 });
@@ -210,13 +246,10 @@ try {
   }
   assert.ok(paintedFrames.size>=15,`Native frames repeated stale pixels: ${paintedFrames.size}`);
   assert.ok(sequences.size >= 15, `Expected fresh MJPEG frames, got ${sequences.size}. ${log}`);
-  await page.click("text/Take control");
-  await page.waitForFunction('document.body.textContent.includes("Release")');
-  const denied: any = await mcp.callTool({
-    name: "evaluate_script",
-    arguments: { function: '() => document.title="WRONG"' },
+  const alongside: any = await mcp.callTool({
+    name: "evaluate_script", arguments: { function: '() => document.title' },
   });
-  assert.equal(denied.isError, true);
+  assert.ok(!alongside.isError, 'Agent remains available while the mobile viewer interacts');
   await mkdir("artifacts", { recursive: true });
   await page.screenshot({ path: resolve("artifacts/native-mobile.png") });
   const mirror = await page.$('[aria-label="Live native browser"]');
@@ -237,20 +270,17 @@ try {
   await page.mouse.click(tapX, tapY);
   await pause(500);
 
-  await page.click("text/Release");
-  await call("shared_browser_acquire_control");
   assert.equal(
     await call("evaluate_script", {
       function: '() => document.querySelector("button").textContent',
     }),
     "Native click",
   );
-  await call("shared_browser_release_control");
   const white=await page.evaluate(`(()=>{const image=document.images[0];const canvas=document.createElement('canvas');canvas.width=image.naturalWidth;canvas.height=image.naturalHeight;const context=canvas.getContext('2d');context.drawImage(image,0,0);const bytes=context.getImageData(0,0,canvas.width,canvas.height).data;let count=0;for(let i=0;i<bytes.length;i+=4)if(bytes[i]>230&&bytes[i+1]>230&&bytes[i+2]>230)count++;return count/(bytes.length/4);})()`);
   assert.ok(Number(white)>0.5,`Parked native page lost its painted content: white fraction=${white}`);
   assert.deepEqual(errors, []);
   console.log(
-    `PASS: native Electron WebView, native snapshots/screenshots/tabs, CDP/HttpOnly cookies, parked-pane mobile mirror and touch;  ${sequences.size} fresh frames/3s; human control fences agent tools.`,
+    `PASS: native Electron WebView, native snapshots/screenshots/tabs, DOM/CSS, CDP/HttpOnly cookies, dialog replies and debugger resume, parked-pane mobile mirror and touch;  ${sequences.size} fresh frames/3s; human and agent input share the same session.`,
   );
 } catch (error) {
   console.error(log.slice(-10_000));

@@ -26,7 +26,8 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/*.test.ts && vitest run client/native client/workspace server/workspace server/native shared/workspace",
+    "test": "tsx --test tests/*.test.ts && vitest run client/native client/workspace server/workspace server/native shared/workspace shared/browser-actions.test.ts",
+    "test:browser-actions": "tsx tests/browser-actions-smoke.ts",
     "test:chrome": "tsx tests/chrome-smoke.ts",
     "postinstall": "node server/prepare.mjs && node server/workspace/prepare-runtime.mjs",
     "test:workspace": "vitest run client/workspace server/workspace shared/workspace",

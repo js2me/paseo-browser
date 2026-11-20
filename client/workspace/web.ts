@@ -1,3 +1,6 @@
+import { normalizeBrowserUrl } from "../../shared/workspace/browser-url";
+import { agentCursorExpression } from "../../shared/native/agent-cursor";
+import { isBrowserAction, runBrowserAction } from "../../shared/browser-actions";
 /**
  * Web-only input and video adapters for the native View's DOM host node. No DOM globals or
  * handlers leak into the cross-platform panel. Non-passive wheel/touch listeners
@@ -404,6 +407,7 @@ export function bindBrowserVideoVisibility(
 
 // Native plugin webviews use the same validated guest registration as Paseo's built-in panes.
 interface NativeDesktopBrowserApi {
+  nativeBridgeVersion?: number;
   profilePartition: string;
   registerAttachedBrowser(input: {
     browserId: string;
@@ -624,7 +628,7 @@ export function mountNativeGuest(
         canGoForward: guest.canGoForward(),
         cdp:
           typeof api.sendNativeCommand === "function" &&
-          typeof api.captureNativeFrame === "function",
+          typeof api.readNativeEvents === "function",
       };
     } catch {
       return null;
@@ -633,9 +637,17 @@ export function mountNativeGuest(
   const cdp = async (method: string, params: Record<string, unknown> = {}) => {
     if (!api.sendNativeCommand)
       throw Error(
-        "Full CDP requires the Paseo native browser bridge. Install the desktop bridge patch included with this plugin.",
+        "Full DevTools access requires a Paseo Desktop version with the native DevTools API. Update Paseo Desktop; no plugin patch is needed.",
       );
     return api.sendNativeCommand({ browserId, workspaceId, method, params });
+  };
+  let cursorOverlayPending = false;
+  const showAgentCursor = (x: number, y: number, pressed = false) => {
+    // A paused page must not delay acknowledged input. Keep at most one overlay task pending.
+    if (cursorOverlayPending || disposed) return;
+    cursorOverlayPending = true;
+    void Promise.resolve().then(() => guest.executeJavaScript(agentCursorExpression(x, y, pressed)))
+      .catch(() => {}).finally(() => { cursorOverlayPending = false; });
   };
   return {
     state,
@@ -709,10 +721,8 @@ export function mountNativeGuest(
       const input = command.input;
       if (command.operation === "tabs.list") return { tabs: [state()] };
       if (command.operation === "open" || command.operation === "navigate") {
-        const url = new URL(String(input.url));
-        if (!["http:", "https:"].includes(url.protocol))
-          throw Error("Only HTTP(S) URLs are supported");
-        await guest.loadURL(url.href);
+        const url = normalizeBrowserUrl(String(input.url));
+        await guest.loadURL(url);
         return state();
       }
       if (command.operation === "back") {
@@ -729,6 +739,29 @@ export function mountNativeGuest(
       }
       if (command.operation === "evaluate")
         return guest.executeJavaScript(String(input.expression));
+      if (command.operation === "cursor") {
+        const current = state();
+        if (!current || input.browserId !== browserId || input.generation !== generation)
+          throw Error("Page changed; inspect the current browser state before moving the cursor");
+        const x = Number(input.x), y = Number(input.y);
+        if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x >= size.width || y >= size.height)
+          throw Error("Invalid agent cursor coordinates");
+        showAgentCursor(x, y, input.action === "click");
+        if (!api.sendNativeCommand) {
+          guest.sendInputEvent({ type: "mouseMove", x, y });
+          if (input.action === "click") {
+            try { guest.sendInputEvent({ type: "mouseDown", x, y, button: "left", clickCount: 1 }); }
+            finally { guest.sendInputEvent({ type: "mouseUp", x, y, button: "left", clickCount: 1 }); }
+          }
+        } else {
+          await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x, y, button: "none" });
+          if (input.action === "click") {
+            try { await cdp("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 }); }
+            finally { await cdp("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 }); }
+          }
+        }
+        return {};
+      }
       if (command.operation === "input") {
         if (input.browserId !== browserId)
           throw Error("Browser tab changed; wait for its current frame");
@@ -804,10 +837,20 @@ export function mountNativeGuest(
         });
         return {};
       }
-      if (command.operation === "cdp_send")
-        return cdp(String(input.method), (input.params ?? {}) as Record<string, unknown>);
+      if (isBrowserAction(command.operation))
+        return runBrowserAction(command.operation, input, async (method, params) => {
+          if (method === "Runtime.evaluate")
+            return { result: { value: await guest.executeJavaScript(String(params.expression)) } };
+          return cdp(method, params);
+        });
+      if (command.operation === "cdp_send") {
+        const params = (input.params ?? {}) as Record<string, unknown>;
+        if (input.method === "Input.dispatchMouseEvent" && typeof params.x === "number" && typeof params.y === "number")
+          showAgentCursor(params.x, params.y, params.type === "mousePressed");
+        return cdp(String(input.method), params);
+      }
       if (command.operation === "cdp_events") {
-        if (!api.readNativeEvents) throw Error("Desktop native CDP bridge is unavailable");
+        if (!api.readNativeEvents) throw Error("Update Paseo Desktop to a version with the native DevTools API");
         return api.readNativeEvents({
           browserId,
           workspaceId,
@@ -826,6 +869,7 @@ export function mountNativeGuest(
         throw Error("Unknown cookie action");
       }
       if (command.operation === "automation") {
+        const before = generation;
         const result = await api.executeAutomationCommand({
           type: "browser.automation.execute.request",
           requestId: command.id,
@@ -837,6 +881,10 @@ export function mountNativeGuest(
           },
         });
         if (!result.ok) throw Error(result.error?.message ?? "Native automation failed");
+        const pointer = result.result as { x?: unknown; y?: unknown; targetX?: unknown; targetY?: unknown } | undefined;
+        const x = pointer?.targetX ?? pointer?.x, y = pointer?.targetY ?? pointer?.y;
+        if (before === generation && typeof x === "number" && typeof y === "number")
+          showAgentCursor(x, y, input.name === "click");
         return result.result;
       }
       throw Error(`Unknown native browser operation: ${command.operation}`);

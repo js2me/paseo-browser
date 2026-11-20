@@ -41,6 +41,7 @@ vi.mock("react", async (original) => {
 });
 vi.mock("react-native", () => ({
   AppState: { currentState: "active", addEventListener: () => ({ remove() {} }) },
+  StyleSheet: { create: (styles: unknown) => styles },
   View: "View", Text: "Text", Pressable: "Pressable", TextInput: "TextInput", ScrollView: "ScrollView",
 }));
 vi.mock("@getpaseo/plugin/client", () => ({
@@ -93,25 +94,24 @@ beforeEach(async () => {
 });
 afterEach(() => vi.useRealTimers());
 
-it("shows a truly empty tab and explains why navigation is disabled", () => {
+it("shows an empty tab and waits for an address without a control handoff", () => {
   expect(address().value).toBe("");
   expect(address().placeholder).toBe("Enter website address");
   expect(go().disabled).toBe(true);
   expect(find(p => p.children === "No website open")).toBeDefined();
-  expect(find(p => p.children === "Take control to open a website or interact with this tab.")).toBeDefined();
+  expect(find(p => p.children === "Take control")).toBeUndefined();
 });
 
-it("blocks keyboard submission without control and retains the explanation across polls", async () => {
-  address().onChangeText("https://example.com"); render();
-  address().onSubmitEditing(); render();
-  expect(alert()).toContain("Take control");
+it("submits navigation while another participant is active", async () => {
+  fixture.controller = "agent";
   await tick(200);
-  expect(alert()).toContain("Take control");
-  expect(fixture.action).not.toHaveBeenCalled();
+  address().onChangeText("https://example.com"); render();
+  address().onSubmitEditing(); await tick();
+  expect(fixture.action).toHaveBeenCalledWith(expect.objectContaining({ operation: "navigate", input: { url: "https://example.com" } }));
+  expect(fixture.control).not.toHaveBeenCalled();
 });
 
-it("enables Go after taking control and keeps navigation errors visible during healthy polling", async () => {
-  find(p => p.children?.props?.children === "Take control").onPress(); await tick();
+it("enables Go directly and keeps navigation errors visible during healthy polling", async () => {
   expect(go().disabled).toBe(true);
   address().onChangeText("https://example.com"); render();
   expect(go().disabled).toBe(false);

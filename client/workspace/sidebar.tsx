@@ -58,7 +58,7 @@ function SessionRow({
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={`Open Workspace Browser for ${name}`}
+      accessibilityLabel={`Open Browser for ${name}`}
       onPress={onPress}
       style={({ pressed }) => [
         styles.row,
@@ -116,7 +116,7 @@ function createSidebarItem(client: PluginClientContext) {
     return (
       <SidebarRow
         icon="PanelsTopLeft"
-        label={`Workspace Browser (${count})`}
+        label={`Browser (${count})`}
         onPress={() => openPopover(SessionsPopover)}
       />
     );
@@ -127,7 +127,7 @@ function createSidebarItem(client: PluginClientContext) {
 export function contributeSharedBrowserSidebar(client: PluginClientContext): () => void {
   return client.addSidebarFooterItem({
     id: "shared-browser-sessions",
-    title: "Workspace Browser",
+    title: "Browser",
     Component: createSidebarItem(client),
   });
 }
