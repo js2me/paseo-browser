@@ -1,5 +1,7 @@
 # Paseo Browser
 
+[![M8ven Verified](https://m8ven.ai/badge/mcp/js2me-paseo-browser-1dzhvn?variant=verified)](https://m8ven.ai/mcp/js2me-paseo-browser-1dzhvn?s=readme)
+
 Native Chromium in Paseo Desktop, with a live mobile broadcast of the same browser session. Agents and people use the same tabs, cookies and page state.
 
 ![Native desktop browser with DevTools control](assets/native-desktop.png)
