@@ -156,6 +156,26 @@ try {
   await call("native_browser_open", { url: `${url}/fixture` });
   await call("native_browser_cursor", { x: 40, y: 50 });
   assert.equal(await call("evaluate_script", { function: '() => Boolean(window.__paseoAgentCursor?.isConnected)' }), true);
+  await call("evaluate_script", { function: `() => {
+    const marker = window.__paseoAgentCursor;
+    marker.getBoundingClientRect();
+    window.cursorMovement = new Promise(resolve => {
+      marker.addEventListener("transitionrun", () => {
+        const start = marker.getBoundingClientRect();
+        marker.addEventListener("transitionend", () => {
+          const end = marker.getBoundingClientRect();
+          resolve({ fromX: start.x, toX: end.x, toY: end.y });
+        }, { once: true });
+      }, { once: true });
+      setTimeout(() => resolve(null), 2000);
+    });
+  }` });
+  await call("native_browser_cursor", { x: 240, y: 150 });
+  const movement = await call("evaluate_script", { function: "() => window.cursorMovement" });
+  assert.ok(movement && movement.fromX >= 40 && movement.fromX < 240,
+    "Cursor travels between coordinates in a Chromium transition");
+  assert.equal(movement.toX, 240);
+  assert.equal(movement.toY, 150);
   const inspection = await call("browser_inspect", { selector: "h1", properties: ["display", "font-size"] });
   assert.match(inspection.html, /Real native Chromium/);
   assert.equal(inspection.computedStyle.display, "block");
@@ -189,7 +209,13 @@ try {
   assert.equal(hover.command, "hover");
   const click = await call("native_browser_cursor", { ref, action: "click" });
   const cursor = await call("evaluate_script", {
-    function: "() => { const marker = window.__paseoAgentCursor; return marker?.isConnected && { x: parseFloat(marker.style.left), y: parseFloat(marker.style.top) }; }",
+    function: `() => {
+      const marker = window.__paseoAgentCursor;
+      if (marker?.isConnected) {
+        const target = new DOMMatrix(marker.style.transform);
+        return { x: target.m41, y: target.m42 };
+      }
+    }`,
   });
   assert.ok(cursor && Math.abs(cursor.x - click.x) < 0.01 && Math.abs(cursor.y - click.y) < 0.01,
     "A native click places the cursor at the clicked coordinates");

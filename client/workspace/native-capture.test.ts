@@ -173,7 +173,7 @@ it("keeps the latest cursor position without waiting for a paused page", async (
   overlay.resolve();
   await vi.advanceTimersByTimeAsync(0);
   expect(executeJavaScript).toHaveBeenCalledTimes(2);
-  expect(executeJavaScript).toHaveBeenLastCalledWith(expect.stringContaining("'left', 110"));
+  expect(executeJavaScript).toHaveBeenLastCalledWith(expect.stringContaining("translate3d(110px, 75px, 0)"));
 });
 
 it("discards queued cursor positions when the page changes", async () => {

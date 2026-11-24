@@ -9,7 +9,7 @@ export function agentCursorExpression(x: number, y: number, pressed = false): st
     if (!host || !host.isConnected) {
       host = document.createElement('div');
       host.setAttribute('aria-hidden', 'true');
-      host.style.cssText = 'all:initial!important;position:fixed!important;z-index:2147483647!important;pointer-events:none!important;width:0!important;height:0!important;';
+      host.style.cssText = 'all:initial!important;position:fixed!important;top:0!important;left:0!important;z-index:2147483647!important;pointer-events:none!important;width:0!important;height:0!important;';
       const root = host.attachShadow({mode:'closed'});
       const marker = document.createElement('div');
       marker.style.cssText = 'width:max-content;pointer-events:none;color:#7c3aed;font:600 11px system-ui;white-space:nowrap;filter:drop-shadow(0 1px 2px #0005)';
@@ -26,8 +26,9 @@ export function agentCursorExpression(x: number, y: number, pressed = false): st
       document.documentElement.appendChild(host);
       window[key] = host;
     }
-    host.style.setProperty('left', ${x} + 'px', 'important');
-    host.style.setProperty('top', ${y} + 'px', 'important');
+    host.style.setProperty('transition', window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      ? 'none' : 'transform 240ms ease-out', 'important');
+    host.style.setProperty('transform', 'translate3d(${x}px, ${y}px, 0)', 'important');
     host.style.setProperty('display', 'block', 'important');
     host.style.setProperty('filter', ${JSON.stringify(pressed ? 'drop-shadow(0 0 5px #a78bfa)' : 'none')}, 'important');
     clearTimeout(host.hideTimer);
