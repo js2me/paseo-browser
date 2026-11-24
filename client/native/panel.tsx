@@ -1,22 +1,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { NativeDesktopService } from "./desktop-service";
 import { z } from "zod";
-import { AppState, ScrollView, Pressable, Text, TextInput, View } from "react-native";
+import { AppState, ScrollView, Pressable, Text, TextInput, View, type ViewStyle } from "react-native";
 import { type PluginWorkspacePanelProps, useRpc, useTabState } from "@getpaseo/plugin/client";
 import {
   nativeActionRpc,
   nativeWatchRpc,
   type NativeState,
 } from "../../shared/native/contracts";
-import { nativeDesktopBrowserApi, nativeTouchPoint } from "../workspace/web";
+import { nativeDesktopBrowserApi } from "../workspace/web";
 
 import { BrowserFrameImage } from "../workspace/browser-frame-image";
 import { useBrowserFrameBuffer } from "../workspace/use-browser-frame-buffer";
-import type { BrowserFrame } from "../../shared/workspace/browser";
+import { containedRect, type BrowserFrame } from "../../shared/workspace/browser";
 import type { FrameCandidate } from "../workspace/browser-frame-buffer";
 import { ChromeIconButton } from "../workspace/browser-chrome";
 import { createStyles } from "../workspace/browser-panel-styles";
 import { nativeFrameCandidate } from "./frame-candidate";
+import { mirrorTapPoint } from "./mirror-geometry";
+import { useMirrorGesture } from "./use-mirror-gesture";
 
 const nativeTabState = z.object({ url: z.string().default("about:blank") });
 export function NativeBrowserPanel({
@@ -45,7 +47,6 @@ export function NativeBrowserPanel({
   );
   const desktop = Boolean(nativeDesktopBrowserApi());
   const host = useRef<View | null>(null);
-  const mirror = useRef<View | null>(null);
   const [state, setState] = useState<NativeState | null>(null);
   const stateRef = useRef<NativeState | null>(null);
   const visibleFrameRef = useRef<BrowserFrame | null>(null);
@@ -72,6 +73,7 @@ export function NativeBrowserPanel({
       setRemembered({ url: state.url });
   }, [state?.url]);
   const [imageSize, setImageSize] = useState({ width: 0, height: 0 });
+  const mirrorRect = frame ? containedRect(imageSize, frame) : null;
   const watch = useRpc(nativeWatchRpc);
   const action = useRpc(nativeActionRpc);
 
@@ -143,6 +145,28 @@ export function NativeBrowserPanel({
       setActionError(String(error));
     }
   };
+  const mirror = useMirrorGesture(
+    imageSize,
+    mirrorRect,
+    JSON.stringify([frameScope, frame?.sessionId, frame?.navigationGeneration]),
+    (point, zoom) => {
+      const latest = stateRef.current;
+      if (
+        !frame || !latest || !mirrorRect ||
+        frame !== visibleFrameRef.current ||
+        frame.sessionId !== latest.browserId ||
+        frame.navigationGeneration !== latest.generation ||
+        latest.url === "about:blank"
+      ) return;
+      const target = mirrorTapPoint(point, imageSize, mirrorRect, zoom, latest);
+      if (!target) return;
+      void run("input", {
+        ...target,
+        generation: frame.navigationGeneration,
+        browserId: frame.sessionId,
+      });
+    },
+  );
   return (
     <View style={{ flex: 1, backgroundColor: theme.colors.surface0 }}>
       <View style={[styles.chrome, styles.addressRow]}>
@@ -236,48 +260,43 @@ export function NativeBrowserPanel({
         <View ref={host} style={{ flex: 1, minHeight: 100 }} />
       ) : (
         <Pressable
-          ref={mirror}
-          style={{ flex: 1 }}
+          ref={mirror.view}
+          style={[
+            { flex: 1, overflow: "hidden" },
+            layout.platform === "web" ? ({ touchAction: "none" } as ViewStyle) : null,
+          ]}
           onLayout={(event) => setImageSize(event.nativeEvent.layout)}
-          onPress={(event) => {
-            if (
-              empty ||
-              !frame ||
-              frame.sessionId !== state?.browserId ||
-              frame.navigationGeneration !== state?.generation ||
-              !imageSize.width ||
-              !imageSize.height
-            )
-              return;
-            const point = nativeTouchPoint(event, mirror.current);
-            if (!point) return;
-            const scale = Math.min(imageSize.width / frame.width, imageSize.height / frame.height);
-            const x = (point.x - (imageSize.width - frame.width * scale) / 2) / scale;
-            const y = (point.y - (imageSize.height - frame.height * scale) / 2) / scale;
-            void run("input", {
-              x: (x * (state?.width ?? frame.width)) / frame.width,
-              y: (y * (state?.height ?? frame.height)) / frame.height,
-              generation: frame.navigationGeneration,
-              browserId: frame.sessionId,
-            });
-          }}
+          {...mirror.touchHandlers}
+          onPress={layout.platform === "web" ? mirror.onMousePress : undefined}
         >
-          {buffer.layers.map((layer) => layer ? (
-            <BrowserFrameImage
-              key={layer.ticket}
-              ticket={layer.ticket}
-              source={layer.source}
-              visible={buffer.front !== null && buffer.layers[buffer.front]?.ticket === layer.ticket}
-              label="Live native browser"
-              x={0}
-              y={0}
-              width={imageSize.width}
-              height={imageSize.height}
-              cornerRadius={0}
-              settled={settled}
-              retry={retryFrame}
-            />
-          ) : null)}
+          <View
+            pointerEvents="none"
+            style={{
+              position: "absolute", top: 0, right: 0, bottom: 0, left: 0,
+              transform: [
+                { translateX: mirror.zoom.x },
+                { translateY: mirror.zoom.y },
+                { scale: mirror.zoom.scale },
+              ],
+            }}
+          >
+            {buffer.layers.map((layer) => layer ? (
+              <BrowserFrameImage
+                key={layer.ticket}
+                ticket={layer.ticket}
+                source={layer.source}
+                visible={buffer.front !== null && buffer.layers[buffer.front]?.ticket === layer.ticket}
+                label="Live native browser"
+                x={0}
+                y={0}
+                width={imageSize.width}
+                height={imageSize.height}
+                cornerRadius={0}
+                settled={settled}
+                retry={retryFrame}
+              />
+            ) : null)}
+          </View>
           {empty && (
             <View
               pointerEvents="none"

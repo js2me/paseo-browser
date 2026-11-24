@@ -33,6 +33,7 @@ const output = await build({
 });
 const errors: string[] = [];
 let hideRequested = false;
+let mobileInputs = 0;
 const rpc: any = {
   "native.presence": () => relay.presence(),
   "native.exchange": (input: any) => relay.exchange(input),
@@ -40,9 +41,10 @@ const rpc: any = {
     relay.watch(input.workspaceId, input.viewerId, input.afterSequence),
   "native.control": (input: any) =>
     relay.control(input.workspaceId, input.viewerId, true, input.action),
-  "native.action": async (input: any) => ({
-    result: await relay.command(input.workspaceId, input.viewerId, input.operation, input.input),
-  }),
+  "native.action": async (input: any) => {
+    if (input.operation === "input") mobileInputs++;
+    return { result: await relay.command(input.workspaceId, input.viewerId, input.operation, input.input) };
+  },
 };
 const http = createServer(async (req, res) => {
   try {
@@ -246,7 +248,7 @@ try {
   });
   mobile = await puppeteer.launch({ executablePath: "/usr/bin/google-chrome", headless: true });
   const page = await mobile.newPage();
-  await page.setViewport({ width: 390, height: 844 });
+  await page.setViewport({ width: 390, height: 844, hasTouch: true });
   await page.goto(url);
   await page.waitForSelector('[aria-label="Live native browser"]', { timeout: 15_000 });
   await page.waitForFunction("Array.from(document.images).some(image=>image.naturalWidth>0)");
@@ -273,16 +275,47 @@ try {
   assert.ok(bounds);
   const current = relay.watch("native-test", "test-native-monitor", 0);
   assert.ok(current.frame && current.state);
-  const scale = Math.min(bounds.width / current.frame.width, bounds.height / current.frame.height);
-  const tapX =
-    bounds.x +
-    (bounds.width - current.frame.width * scale) / 2 +
-    ((button.x * current.frame.width) / current.state.width) * scale;
-  const tapY =
-    bounds.y +
-    (bounds.height - current.frame.height * scale) / 2 +
-    ((button.y * current.frame.height) / current.state.height) * scale;
-  await page.mouse.click(tapX, tapY);
+  const { frame: displayed, state: desktopState } = current;
+  function buttonPoint(rect: typeof bounds) {
+    assert.ok(rect);
+    const scale = Math.min(rect.width / displayed.width, rect.height / displayed.height);
+    const width = displayed.width * scale;
+    const height = displayed.height * scale;
+    return {
+      x: rect.x + (rect.width - width) / 2 + button.x / desktopState.width * width,
+      y: rect.y + (rect.height - height) / 2 + button.y / desktopState.height * height,
+    };
+  }
+  await page.touchscreen.tap(bounds.x + bounds.width / 2, bounds.y + 4);
+  const touch = await page.createCDPSession();
+  const center = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
+  const pair = (radius: number) => [
+    { x: center.x - radius, y: center.y, id: 1 },
+    { x: center.x + radius, y: center.y, id: 2 },
+  ];
+  async function pinch(from: number, to: number) {
+    await touch.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: pair(from) });
+    await touch.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: pair(to) });
+    await touch.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  }
+  await pinch(40, 80);
+  await page.waitForFunction((width) =>
+    Array.from((globalThis as any).document.querySelectorAll('[aria-label="Live native browser"]'))
+      .some((image: any) => image.getBoundingClientRect().width > width * 1.8), {}, bounds.width);
+  assert.equal(mobileInputs, 0, "Letterbox taps and pinches do not send page clicks");
+  const visible = await page.$('[aria-label="Live native browser"]');
+  const zoomed = buttonPoint(await visible!.boundingBox());
+  // The fixture's button is near the top left. Pan it back into the clipped window.
+  if (zoomed.x < bounds.x || zoomed.y < bounds.y) {
+    const dx = Math.max(0, bounds.x + 25 - zoomed.x);
+    const dy = Math.max(0, bounds.y + 25 - zoomed.y);
+    await touch.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ ...center, id: 1 }] });
+    await touch.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: center.x + dx, y: center.y + dy, id: 1 }] });
+    await touch.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  }
+  const zoomedImage = await page.$('[aria-label="Live native browser"]');
+  const tap = buttonPoint(await zoomedImage!.boundingBox());
+  await page.touchscreen.tap(tap.x, tap.y);
   await pause(500);
 
   assert.equal(
@@ -291,6 +324,12 @@ try {
     }),
     "Native click",
   );
+  assert.equal(mobileInputs, 1, "Only the tap on zoomed content reaches Chromium");
+  await pinch(80, 40);
+  await page.waitForFunction((width) =>
+    Array.from((globalThis as any).document.querySelectorAll('[aria-label="Live native browser"]'))
+      .some((image: any) => Math.abs(image.getBoundingClientRect().width - width) < 1), {}, bounds.width);
+  assert.equal(mobileInputs, 1, "Pinching back to fit does not send a page click");
   const white=await page.evaluate(`(()=>{const image=document.images[0];const canvas=document.createElement('canvas');canvas.width=image.naturalWidth;canvas.height=image.naturalHeight;const context=canvas.getContext('2d');context.drawImage(image,0,0);const bytes=context.getImageData(0,0,canvas.width,canvas.height).data;let count=0;for(let i=0;i<bytes.length;i+=4)if(bytes[i]>230&&bytes[i+1]>230&&bytes[i+2]>230)count++;return count/(bytes.length/4);})()`);
   assert.ok(Number(white)>0.5,`Parked native page lost its painted content: white fraction=${white}`);
   assert.deepEqual(errors, []);
