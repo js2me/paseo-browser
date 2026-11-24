@@ -52,7 +52,7 @@ The files under `integrations/paseo/` are developer integration artifacts, not e
 Native mode injects the `paseo-browser` MCP adapter:
 
 - `native_browser_open`, `shared_browser_status`, navigation and native tab tools.
-- `native_browser_cursor` moves the visible Agent pointer or clicks at viewport CSS coordinates. Pass `browserId` and `generation` from current status, `x`, `y`, and `action: "move" | "click"`. Native pointer automation also displays the pointer, including in mobile broadcasts.
+- `native_browser_cursor` moves the visible Agent pointer with `{ ref }` from a snapshot or `{ x, y }` in viewport CSS pixels. Add `action: "click"` to click. The selected tab is automatic. You can pass `browserId` and `generation` together to require a specific page. The pointer also appears in mobile broadcasts.
 - `native_browser_automation` for snapshots, click/fill/type, keyboard, wait, screenshot, upload/select, hover/drag, console/network logs, scrolling and resizing.
 - `evaluate_script` for page JavaScript.
 - `browser_cookies` for import/export, setting, deletion and clearing, including HttpOnly/Secure attributes.

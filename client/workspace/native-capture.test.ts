@@ -159,7 +159,7 @@ it.each([true, false])("moves the agent cursor without clicking and fences stale
   expect(executeJavaScript).toHaveBeenCalledTimes(1);
 });
 
-it("does not wait for cursor overlays on a paused page and bounds pending overlay work", async () => {
+it("keeps the latest cursor position without waiting for a paused page", async () => {
   const { controller, guest, sendNativeCommand } = await fixture();
   const overlay = Promise.withResolvers<void>();
   const executeJavaScript = vi.fn().mockReturnValue(overlay.promise);
@@ -167,11 +167,28 @@ it("does not wait for cursor overlays on a paused page and bounds pending overla
   const input = { browserId: "browser", generation: controller.state()!.generation, x: 42, y: 75, action: "move" };
   await controller.execute({ id: "first", operation: "cursor", input });
   await controller.execute({ id: "second", operation: "cursor", input: { ...input, x: 100 } });
-  expect(sendNativeCommand).toHaveBeenCalledTimes(2);
+  await controller.execute({ id: "third", operation: "cursor", input: { ...input, x: 110 } });
+  expect(sendNativeCommand).toHaveBeenCalledTimes(3);
   expect(executeJavaScript).toHaveBeenCalledTimes(1);
   overlay.resolve();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(executeJavaScript).toHaveBeenCalledTimes(2);
+  expect(executeJavaScript).toHaveBeenLastCalledWith(expect.stringContaining("'left', 110"));
 });
 
+it("discards queued cursor positions when the page changes", async () => {
+  const { controller, guest, listeners } = await fixture();
+  const overlay = Promise.withResolvers<void>();
+  const executeJavaScript = vi.fn().mockReturnValue(overlay.promise);
+  Object.assign(guest, { executeJavaScript });
+  const input = { browserId: "browser", generation: controller.state()!.generation, x: 42, y: 75, action: "move" };
+  await controller.execute({ id: "first", operation: "cursor", input });
+  await controller.execute({ id: "second", operation: "cursor", input: { ...input, x: 100 } });
+  listeners.get("did-navigate")!();
+  overlay.resolve();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(executeJavaScript).toHaveBeenCalledTimes(1);
+});
 
 it.each(["open", "navigate"])("normalizes address-bar URLs before native %s", async (operation) => {
   const { controller, guest } = await fixture();

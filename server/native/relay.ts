@@ -238,6 +238,11 @@ export class NativeRelay {
         connected: Boolean(workspace.clientId),
         controller: workspace.control?.id ?? null,
       };
+    if (operation === "cursor" && input.browserId === undefined && input.generation === undefined) {
+      const page = workspace.state;
+      if (!page) throw Error("No native page is ready. Open a page with native_browser_open first.");
+      input = { ...input, browserId: page.browserId, generation: page.generation };
+    }
     if (workspace.pending.size >= 32) throw Error("Native browser queue is full");
     return new Promise<unknown>((resolve, reject) => {
       const completion = Promise.withResolvers<void>();

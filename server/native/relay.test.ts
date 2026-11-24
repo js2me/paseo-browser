@@ -82,6 +82,22 @@ it("orders agent and human commands without acquiring or transferring control", 
   exchange(relay, [{ id: third.id, result: 2 }]);
   expect(await last).toBe(2);
 });
+it("binds a short cursor call to the page selected when the command is queued", async () => {
+  const relay = fixture();
+  await expect(relay.command("workspace", "agent", "cursor", { x: 10, y: 20 }))
+    .rejects.toThrow("No native page is ready");
+  exchange(relay);
+  const cursor = relay.command("workspace", "agent", "cursor", { ref: "@e1", action: "click" });
+  const command = relay.exchange({
+    clientId: desktop, workspaceId: "workspace", state: { ...state, generation: 2 },
+    frame: null, results: [],
+  }).commands[0];
+  expect(command.input).toEqual({
+    ref: "@e1", action: "click", browserId: state.browserId, generation: state.generation,
+  });
+  exchange(relay, [{ id: command.id, result: {} }]);
+  await cursor;
+});
 it("invalidates a lost desktop and never replays a published mutation on another desktop", async () => {
   let now = 1000;
   const relay = fixture(() => now);

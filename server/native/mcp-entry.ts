@@ -13,10 +13,19 @@ const schemas = {
   shared_browser_tab_select: z.object({ tabId: z.string() }),
   shared_browser_tab_close: z.object({}),
   native_browser_cursor: z.object({
-    x: z.number().finite().nonnegative(), y: z.number().finite().nonnegative(),
-    browserId: z.string().min(1), generation: z.number().int().nonnegative(),
+    ref: z.string().min(1).optional().describe("Element ref from the current snapshot."),
+    x: z.number().finite().nonnegative().optional().describe("Viewport CSS x coordinate."),
+    y: z.number().finite().nonnegative().optional().describe("Viewport CSS y coordinate."),
+    browserId: z.string().min(1).optional().describe("Optional tab guard. Pass with generation."),
+    generation: z.number().int().nonnegative().optional().describe("Optional page guard. Pass with browserId."),
     action: z.enum(["move", "click"]).default("move"),
-  }),
+  }).refine(
+    ({ ref, x, y }) => ref === undefined ? x !== undefined && y !== undefined : x === undefined && y === undefined,
+    "Pass ref or both x and y.",
+  ).refine(
+    ({ browserId, generation }) => (browserId === undefined) === (generation === undefined),
+    "Pass browserId and generation together or omit both.",
+  ),
   native_browser_open: z.object({ url: z.string().url() }),
   shared_browser_navigate: z.object({
     action: z.discriminatedUnion("kind", [
@@ -55,10 +64,12 @@ const tools = [
       name === "native_browser_open"
         ? "Open a site in the native desktop WebView shared with the mobile broadcast. Keep Paseo Desktop connected to the host; the browser starts even when its panel is closed."
         : name === "native_browser_automation"
-          ? "Execute a Paseo native browser command in the same desktop guest. Use snapshot for element refs; pass command arguments in args."
+          ? "Get element refs with snapshot. Use native_browser_cursor for simple clicks and moves. Use this tool for drag, form input and other page interactions. Pass command arguments in args."
           : name === "native_browser_cursor"
-            ? "Move the visible Agent cursor or click at viewport CSS coordinates. Read browserId and generation from current status first. Shared control is always available."
-            : `Native shared browser: ${name}. Work alongside the user; no control handoff is needed.`,
+            ? 'Move the visible Agent cursor with {ref} from a snapshot or {x,y} in viewport CSS pixels. Add action:"click" to click. Uses the selected tab automatically.'
+            : name === "evaluate_script"
+              ? "Run JavaScript for page inspection or programmatic changes. Use native_browser_cursor for visible clicks and moves, or native_browser_automation for drag and form input."
+              : `Native shared browser: ${name}. Work alongside the user; no control handoff is needed.`,
     inputSchema: z.toJSONSchema(schema, { target: "draft-7", io: "input" }),
   })),
 ];

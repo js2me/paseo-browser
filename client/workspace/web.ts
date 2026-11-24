@@ -642,12 +642,49 @@ export function mountNativeGuest(
     return api.sendNativeCommand({ browserId, workspaceId, method, params });
   };
   let cursorOverlayPending = false;
-  const showAgentCursor = (x: number, y: number, pressed = false) => {
-    // A paused page must not delay acknowledged input. Keep at most one overlay task pending.
-    if (cursorOverlayPending || disposed) return;
+  let nextCursor: { x: number; y: number; pressed: boolean; generation: number } | undefined;
+  const flushAgentCursor = () => {
+    if (cursorOverlayPending || !nextCursor) return;
+    const cursor = nextCursor;
+    nextCursor = undefined;
+    if (disposed || cursor.generation !== generation) return;
     cursorOverlayPending = true;
-    void Promise.resolve().then(() => guest.executeJavaScript(agentCursorExpression(x, y, pressed)))
-      .catch(() => {}).finally(() => { cursorOverlayPending = false; });
+    void Promise.resolve().then(() => {
+      if (disposed || cursor.generation !== generation) return;
+      return guest.executeJavaScript(agentCursorExpression(cursor.x, cursor.y, cursor.pressed));
+    }).catch(() => {}).finally(() => {
+      cursorOverlayPending = false;
+      flushAgentCursor();
+    });
+  };
+  const showAgentCursor = (x: number, y: number, pressed = false) => {
+    // Keep the latest position without delaying input or piling up work on a paused page.
+    nextCursor = { x, y, pressed, generation };
+    flushAgentCursor();
+  };
+  const runAutomation = async (
+    requestId: string,
+    name: unknown,
+    args: Record<string, unknown> | undefined,
+    cwd?: unknown,
+  ) => {
+    const before = generation;
+    const result = await api.executeAutomationCommand({
+      type: "browser.automation.execute.request",
+      requestId,
+      workspaceId,
+      ...(typeof cwd === "string" ? { cwd } : {}),
+      command: {
+        command: name,
+        args: { ...args, browserId },
+      },
+    });
+    if (!result.ok) throw Error(result.error?.message ?? "Native automation failed");
+    const pointer = result.result as { x?: unknown; y?: unknown; targetX?: unknown; targetY?: unknown } | undefined;
+    const x = pointer?.targetX ?? pointer?.x, y = pointer?.targetY ?? pointer?.y;
+    if (before === generation && typeof x === "number" && typeof y === "number")
+      showAgentCursor(x, y, name === "click");
+    return result.result;
   };
   return {
     state,
@@ -742,20 +779,23 @@ export function mountNativeGuest(
       if (command.operation === "cursor") {
         const current = state();
         if (!current || input.browserId !== browserId || input.generation !== generation)
-          throw Error("Page changed; inspect the current browser state before moving the cursor");
+          throw Error("Page changed; refresh the snapshot or coordinates before using the cursor");
+        const click = input.action === "click";
+        if (typeof input.ref === "string")
+          return runAutomation(command.id, click ? "click" : "hover", { ref: input.ref });
         const x = Number(input.x), y = Number(input.y);
         if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x >= size.width || y >= size.height)
           throw Error("Invalid agent cursor coordinates");
-        showAgentCursor(x, y, input.action === "click");
+        showAgentCursor(x, y, click);
         if (!api.sendNativeCommand) {
           guest.sendInputEvent({ type: "mouseMove", x, y });
-          if (input.action === "click") {
+          if (click) {
             try { guest.sendInputEvent({ type: "mouseDown", x, y, button: "left", clickCount: 1 }); }
             finally { guest.sendInputEvent({ type: "mouseUp", x, y, button: "left", clickCount: 1 }); }
           }
         } else {
           await cdp("Input.dispatchMouseEvent", { type: "mouseMoved", x, y, button: "none" });
-          if (input.action === "click") {
+          if (click) {
             try { await cdp("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 }); }
             finally { await cdp("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 }); }
           }
@@ -868,25 +908,8 @@ export function mountNativeGuest(
         }
         throw Error("Unknown cookie action");
       }
-      if (command.operation === "automation") {
-        const before = generation;
-        const result = await api.executeAutomationCommand({
-          type: "browser.automation.execute.request",
-          requestId: command.id,
-          workspaceId,
-          ...(typeof input.cwd === "string" ? { cwd: input.cwd } : {}),
-          command: {
-            command: input.name,
-            args: { ...((input.args as Record<string, unknown>) ?? {}), browserId },
-          },
-        });
-        if (!result.ok) throw Error(result.error?.message ?? "Native automation failed");
-        const pointer = result.result as { x?: unknown; y?: unknown; targetX?: unknown; targetY?: unknown } | undefined;
-        const x = pointer?.targetX ?? pointer?.x, y = pointer?.targetY ?? pointer?.y;
-        if (before === generation && typeof x === "number" && typeof y === "number")
-          showAgentCursor(x, y, input.name === "click");
-        return result.result;
-      }
+      if (command.operation === "automation")
+        return runAutomation(command.id, input.name, input.args as Record<string, unknown>, input.cwd);
       throw Error(`Unknown native browser operation: ${command.operation}`);
     },
     inputEnabled(enabled) {

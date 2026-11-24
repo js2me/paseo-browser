@@ -106,6 +106,7 @@ await build({
   platform: "node",
   format: "esm",
   external: ["electron"],
+  alias: { "@getpaseo/protocol/browser-native": join(checkout, "packages/protocol/src/browser-native.ts") },
   outfile: join(directory, "main.mjs"),
 });
 const display = await createPrivateVirtualDisplay();
@@ -151,9 +152,7 @@ try {
     return JSON.parse(result.content[0].text);
   };
   await call("native_browser_open", { url: `${url}/fixture` });
-  const cursorState = await call("shared_browser_status");
-  await call("native_browser_cursor", { browserId: cursorState.state.browserId,
-    generation: cursorState.state.generation, x: 40, y: 50, action: "move" });
+  await call("native_browser_cursor", { x: 40, y: 50 });
   assert.equal(await call("evaluate_script", { function: '() => Boolean(window.__paseoAgentCursor?.isConnected)' }), true);
   const inspection = await call("browser_inspect", { selector: "h1", properties: ["display", "font-size"] });
   assert.match(inspection.html, /Real native Chromium/);
@@ -182,6 +181,22 @@ try {
   );
   const snapshot = await call("native_browser_automation", { name: "snapshot" });
   assert.match(JSON.stringify(snapshot), /Real native Chromium/);
+  const ref = /button "Click me" \[ref=([^\]]+)\]/.exec(snapshot.snapshot)?.[1];
+  assert.ok(ref, "Native snapshot exposes the button ref");
+  const hover = await call("native_browser_cursor", { ref });
+  assert.equal(hover.command, "hover");
+  const click = await call("native_browser_cursor", { ref, action: "click" });
+  const cursor = await call("evaluate_script", {
+    function: "() => { const marker = window.__paseoAgentCursor; return marker?.isConnected && { x: parseFloat(marker.style.left), y: parseFloat(marker.style.top) }; }",
+  });
+  assert.ok(cursor && Math.abs(cursor.x - click.x) < 0.01 && Math.abs(cursor.y - click.y) < 0.01,
+    "A native click places the cursor at the clicked coordinates");
+  assert.equal(await call("evaluate_script", {
+    function: '() => document.querySelector("button").textContent',
+  }), "Native click");
+  await call("evaluate_script", {
+    function: '() => { document.querySelector("button").textContent = "Click me"; }',
+  });
   const screenshot: any = await mcp.callTool({
     name: "native_browser_automation",
     arguments: { name: "screenshot", args: {} },
